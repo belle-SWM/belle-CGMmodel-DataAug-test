@@ -1,3 +1,11 @@
+"""
+血糖分類模型建置流程：
+DataArrangement 負責把 srj 原始感測資料(ECG/motion/breath/temp)依血糖紀錄時間切段、
+做ECG品質檢查與特徵擷取，最後依血糖值分成 Low/Normal/High 並切成 Train/Test 資料夾；
+ecgDataset/ecgDatasetSubset 讀取切好的資料做正規化+DWT特徵轉換(可選data augmentation)；
+CNN/TwoClasses_CNN 為 Conv1d+LSTM 架構，BuildModel_ThreeClasses/BuildModel_TwoClasses
+依可用類別數選擇對應模型跑訓練迴圈並保存表現最佳的模型權重。
+"""
 import os
 import shutil
 import sys
@@ -7,7 +15,6 @@ from scipy.fftpack import fft
 import pywt
 import torch
 from torch.utils.data.dataset import Dataset
-from torch.utils.data.sampler import SubsetRandomSampler
 from torch.utils.data import DataLoader
 import torch.optim as optim
 ###import torch.nn.functional as F
@@ -48,39 +55,42 @@ class DataArrangement:
         UnzipFileNameList = data_load_concate.search_unzip_file(db_path=db_path, target_uuid=uuid, start_time=start_time, end_time=end_time, export_path=uuid_export_path)   
 
     
+    ##雲端下載參數(start_time,end_time,server_db_path)給有預設值，本機資料流程呼叫時可以不用傳，
+    ##行為與過去相容；只有同事需要從雲端抓zip檔時才需要額外傳這三個參數觸發下面的unzip_file
     ##def data_processing(self,uuid,start_time,end_time,srj_db_path,glucosedata_path,basepath,server_db_path): ##測試用
-    def data_processing(self,uuid,srj_db_path,glucosedata_path,basepath):
-        
+    def data_processing(self,uuid,srj_db_path,glucosedata_path,basepath,start_time=None,end_time=None,server_db_path=""):
+
         errorcode="0"
         message=""
-        
-        ##測試用  
-        
-        if(server_db_path!=""):  ###測試用,需要抓雲端上的zip檔案 
-            print('Start unzippig file!')      
-            self.unzip_file(uuid,start_time,end_time,server_db_path,srj_db_path) ##自雲端資料夾中將ECG壓縮檔解壓縮成srj檔放置到srj_db_path路徑下                  
-        
-        
-        print('Start data parsing！') 
-        errorcode, message = self.data_parsing(uuid,srj_db_path,glucosedata_path,basepath) ##srj檔分析後將ECG資料放置於export_txtfile_path路徑下      
+
+        ##測試用
+
+        if(server_db_path!=""):  ###測試用,需要抓雲端上的zip檔案
+            print('Start unzippig file!')
+            self.unzip_file(uuid,start_time,end_time,server_db_path,srj_db_path) ##自雲端資料夾中將ECG壓縮檔解壓縮成srj檔放置到srj_db_path路徑下
+
+
+        print('Start data parsing！')
+        errorcode, message = self.data_parsing(uuid,srj_db_path,glucosedata_path,basepath) ##srj檔分析後將ECG資料放置於export_txtfile_path路徑下
         if int(errorcode)<0:
             return errorcode, message
 
 
-        # print('Start feature extracting!') 
-        # errorcode, message = self.feature_extraction(uuid,basepath) ##擷取ECG特徵          
-        # if int(errorcode)<0:
-        #     return errorcode, message
-      
-       
+        ##此三步驟先前被註解掉(推測是在測試_load_all_srj_data效能優化時暫時關閉)，
+        ##註解掉的狀態下只會做完data_parsing就結束，不會真的產出訓練用資料/訓練模型，現重新打開
+        print('Start feature extracting!')
+        errorcode, message = self.feature_extraction(uuid,basepath) ##擷取ECG特徵
+        if int(errorcode)<0:
+            return errorcode, message
 
-        # print('Start data arrangement!') 
-        # errorcode, message = self.data_arrangement(uuid,glucosedata_path,basepath) 
-        # if int(errorcode)<0:
-        #     return errorcode, message
-        
-        # message="data processing is done!"
-        
+
+        print('Start data arrangement!')
+        errorcode, message = self.data_arrangement(uuid,glucosedata_path,basepath)
+        if int(errorcode)<0:
+            return errorcode, message
+
+        message="data processing is done!"
+
         return errorcode, message
     
     def data_parsing(self,uuid,srj_db_path,glucosedata_path,export_txtfile_path): 
@@ -742,11 +752,12 @@ class DataArrangement:
                 
 
 class ecgDataset(Dataset):
-    def __init__(self, dir_path, method='combine', classes=3):
+    def __init__(self, dir_path, method='combine', classes=3, augment=False):
         self.dir_path = os.path.abspath(dir_path)
         self.method = method
-        self.data_len = 150 
-        
+        self.data_len = 150
+        self.augment = augment
+
         if(classes==2):
             normalSigs = self.read_files('Normal')
             normalLabels = np.zeros(len(normalSigs))
@@ -776,11 +787,30 @@ class ecgDataset(Dataset):
     def __getitem__(self, index):
         signal = self.Signals[index]
         label = self.Labels[index]
-        
+
+        if self.augment:
+            signal = self.augment_signal(signal)
+
         return signal, label
 
     def __len__(self):
         return len(self.Labels)
+
+    # 對已完成特徵轉換的訊號做輕量資料增強：加雜訊、振幅縮放、時間平移(只用於training data)
+    def augment_signal(self, signal):
+        if torch.rand(1).item() < 0.5:  ##加高斯雜訊
+            noise_std = 0.02
+            signal = signal + torch.randn_like(signal) * noise_std
+
+        if torch.rand(1).item() < 0.5:  ##振幅隨機縮放0.9~1.1倍
+            scale = 1.0 + (torch.rand(1).item() - 0.5) * 0.2
+            signal = signal * scale
+
+        if torch.rand(1).item() < 0.5:  ##時間軸小幅平移
+            shift = int(torch.randint(-5, 6, (1,)).item())
+            signal = torch.roll(signal, shifts=shift, dims=-1)
+
+        return signal
 
     # Parsing files in folder
     def read_files(self, foldername):
@@ -850,12 +880,36 @@ class ecgDataset(Dataset):
         ##sig = np.zeros(2504)
         sig = np.zeros(150)
         sig[:len(x)] = x
-        coeffs = pywt.swt(sig, 'sym4', level=1, trim_approx=True)       
+        coeffs = pywt.swt(sig, 'sym4', level=1, trim_approx=True)
         coeffs = np.array(coeffs)
-                     
+
         return coeffs
-        
-        
+
+
+class ecgDatasetSubset(Dataset):
+    """
+    包裝 ecgDataset 的子集合(依索引挑選)，讓 train/valid 可以共用同一份已預先載入、
+    做完特徵轉換的資料，但各自獨立控制是否啟用 data augmentation。
+    """
+    def __init__(self, base_dataset, indices, augment=False):
+        self.base_dataset = base_dataset
+        self.indices = indices
+        self.augment = augment
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        real_index = self.indices[idx]
+        signal = self.base_dataset.Signals[real_index]
+        label = self.base_dataset.Labels[real_index]
+
+        if self.augment:
+            signal = self.base_dataset.augment_signal(signal)
+
+        return signal, label
+
+
 class CNN(torch.nn.Module):
 
     def __init__(self, input_channel, data_len=150): ##2500
@@ -1216,41 +1270,41 @@ def BuildModel(uuid,basepath,srj_db_path,glucosedata_path):
     
 
     if(int(errorcode)<0):
-        return status, errorcode, message     
-       
-    # checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Train","Low")
-    # filelist_low_train=os.listdir(checkedpath)
+        return status, errorcode, message
 
-    # checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Test","Low")
-    # filelist_low_test=os.listdir(checkedpath)
+    checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Train","Low")
+    filelist_low_train=os.listdir(checkedpath)
 
-    # checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Train","High")
-    # filelist_high_train=os.listdir(checkedpath)
+    checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Test","Low")
+    filelist_low_test=os.listdir(checkedpath)
 
-    # checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Test","High")
-    # filelist_high_test=os.listdir(checkedpath)
+    checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Train","High")
+    filelist_high_train=os.listdir(checkedpath)
 
-    # checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Train","Normal")
-    # filelist_normal_train=os.listdir(checkedpath)
+    checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Test","High")
+    filelist_high_test=os.listdir(checkedpath)
 
-    # checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Test","Normal")
-    # filelist_normal_test=os.listdir(checkedpath)
+    checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Train","Normal")
+    filelist_normal_train=os.listdir(checkedpath)
+
+    checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Test","Normal")
+    filelist_normal_test=os.listdir(checkedpath)
 
 
-    # if(len(filelist_low_train)>0 and len(filelist_low_test)>0 and len(filelist_high_train)>0 and len(filelist_high_test)>0 and len(filelist_normal_train)>0 and len(filelist_normal_test)>0):  ###有中，低和高血糖資料
-    #     status, errorcode, message=BuildModel_ThreeClasses(uuid,basepath)
-    #     if(int(errorcode)>=0):
-    #         message="Model with three classes has been built!"
-    # elif(len(filelist_high_train)==0 or len(filelist_high_test)==0 or len(filelist_normal_train)==0 or len(filelist_normal_test)==0):
-    #     errorcode="-402"
-    #     message="An error occurs in the BuildModel function: No enough normal or high glucose data!"
-    #     status=-1
-    # else:
-    #   status, errorcode, message=BuildModel_TwoClasses(uuid,basepath)
-    #   if(int(errorcode)>=0):
-    #     message="Model with two classes has been built!"
+    if(len(filelist_low_train)>0 and len(filelist_low_test)>0 and len(filelist_high_train)>0 and len(filelist_high_test)>0 and len(filelist_normal_train)>0 and len(filelist_normal_test)>0):  ###有中，低和高血糖資料
+        status, errorcode, message=BuildModel_ThreeClasses(uuid,basepath)
+        if(int(errorcode)>=0):
+            message="Model with three classes has been built!"
+    elif(len(filelist_high_train)==0 or len(filelist_high_test)==0 or len(filelist_normal_train)==0 or len(filelist_normal_test)==0):
+        errorcode="-402"
+        message="An error occurs in the BuildModel function: No enough normal or high glucose data!"
+        status=-1
+    else:
+      status, errorcode, message=BuildModel_TwoClasses(uuid,basepath)
+      if(int(errorcode)>=0):
+        message="Model with two classes has been built!"
 
-    return status, errorcode, message   
+    return status, errorcode, message
  
 
 def BuildModel_ThreeClasses(uuid,basepath):
@@ -1320,27 +1374,27 @@ def BuildModel_ThreeClasses(uuid,basepath):
     
     train_indices, val_indices = indices[split:], indices[:split]
 
-    ## Creating PT data samplers and loaders:
-    train_sampler = SubsetRandomSampler(train_indices)
-    valid_sampler = SubsetRandomSampler(val_indices)
+    ## 只對training data做data augmentation, validation/test data維持原樣
+    train_dataset = ecgDatasetSubset(dataset, train_indices, augment=True)
+    valid_dataset = ecgDatasetSubset(dataset, val_indices, augment=False)
 
-    train_loader = DataLoader(dataset, batch_size=Batch_size, sampler=train_sampler)
-    valid_loader = DataLoader(dataset, batch_size=Batch_size, sampler=valid_sampler)
+    train_loader = DataLoader(train_dataset, batch_size=Batch_size, shuffle=True)
+    valid_loader = DataLoader(valid_dataset, batch_size=Batch_size)
     current_test_path=os.path.join(basepath,'GlucoseData_'+uuid,'Test')
 
     filelist_low=os.listdir(os.path.join(current_test_path,'Low'))
     filelist_high=os.listdir(os.path.join(current_test_path,'High'))
     filelist_normal=os.listdir(os.path.join(current_test_path,'Normal'))
 
-    if(len(filelist_low)==0 or len(filelist_high)==0 or len(filelist_normal)==0):        
+    if(len(filelist_low)==0 or len(filelist_high)==0 or len(filelist_normal)==0):
         errorcode="-401"
         message="An error occurs in the BuildModel_ThreeClasses function: No testing data"
-        
-        return errorcode,message  
-    
+
+        return errorcode,message
+
     testdata = ecgDataset(dir_path = current_test_path, method=Method)
     test_loader = DataLoader(testdata, batch_size=Batch_size)
-    train_num, valid_num, test_num = len(train_sampler),len(valid_sampler),len(testdata)
+    train_num, valid_num, test_num = len(train_dataset),len(valid_dataset),len(testdata)
     total_num = train_num + valid_num + test_num
 
     print("#Train:%5d(%.2f), #Validation:%5d(%.2f), #Test:%5d(%.2f)\n" 
@@ -1391,8 +1445,8 @@ def BuildModel_ThreeClasses(uuid,basepath):
         loss_function = torch.nn.CrossEntropyLoss().to(device)
         optimizer = optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999), weight_decay=1e-3)
         ##optimizer = optim.Adam(model.parameters(), lr=0.0003, betas=(0.9, 0.999), weight_decay=1e-3)
-       
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, verbose=1,patience=patience, cooldown=0, min_lr=0.00001)   
+        ##PyTorch 2.x的ReduceLROnPlateau已移除verbose參數，傳了會直接TypeError，故拿掉
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=patience, cooldown=0, min_lr=0.00001)
 
         n_patience = 0
         min_valid_loss = 0
@@ -1733,28 +1787,28 @@ def BuildModel_TwoClasses(uuid,basepath):
     
     train_indices, val_indices = indices[split:], indices[:split]
 
-    # Creating PT data samplers and loaders:
-    train_sampler = SubsetRandomSampler(train_indices)
-    valid_sampler = SubsetRandomSampler(val_indices)
+    ## 只對training data做data augmentation, validation/test data維持原樣
+    train_dataset = ecgDatasetSubset(dataset, train_indices, augment=True)
+    valid_dataset = ecgDatasetSubset(dataset, val_indices, augment=False)
 
-    train_loader = DataLoader(dataset, batch_size=Batch_size, sampler=train_sampler)
-    valid_loader = DataLoader(dataset, batch_size=Batch_size, sampler=valid_sampler)
+    train_loader = DataLoader(train_dataset, batch_size=Batch_size, shuffle=True)
+    valid_loader = DataLoader(valid_dataset, batch_size=Batch_size)
     current_test_path=os.path.join(basepath,'GlucoseData_'+uuid,'Test')
 
-   
+
     filelist_high=os.listdir(os.path.join(current_test_path,'High'))
     filelist_normal=os.listdir(os.path.join(current_test_path,'Normal'))
 
     if(len(filelist_high)==0 or len(filelist_normal)==0):
         errorcode="-501"
         message="An error occurs in the BuildModel_TwoClasses function: No testing data"
-        return errorcode,message 
-    
+        return errorcode,message
+
     testdata = ecgDataset(dir_path=current_test_path, method=Method, classes=2)
 
     test_loader = DataLoader(testdata, batch_size=Batch_size)
 
-    train_num, valid_num, test_num = len(train_sampler),len(valid_sampler),len(testdata)
+    train_num, valid_num, test_num = len(train_dataset),len(valid_dataset),len(testdata)
     total_num = train_num + valid_num + test_num
 
     print("#Train:%5d(%.2f), #Validation:%5d(%.2f), #Test:%5d(%.2f)\n" 
@@ -1806,7 +1860,8 @@ def BuildModel_TwoClasses(uuid,basepath):
         loss_function = torch.nn.BCEWithLogitsLoss().to(device)
         optimizer = optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999), weight_decay=1e-3)
         ###optimizer = optim.Adam(model.parameters(), lr=0.0003, betas=(0.9, 0.999), weight_decay=1e-3)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, verbose=1, patience=100, cooldown=0, min_lr=0.00001)
+        ##PyTorch 2.x的ReduceLROnPlateau已移除verbose參數，傳了會直接TypeError，故拿掉
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=100, cooldown=0, min_lr=0.00001)
     
         patience =100
         n_patience = 0
