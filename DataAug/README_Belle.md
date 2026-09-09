@@ -249,3 +249,32 @@ def data_processing(self,uuid,srj_db_path,glucosedata_path,basepath,start_time=N
 把原本單一 uuid 的示範，改成依 `GlucoseDataCSV` 現有的全部 10 個 uuid（`2197,2199,2204,2206,2208,2210,2215,2216,2223,2249`）跑 `DataArrangement.data_processing(...)`（只做下載+資料處理，**不含模型訓練**）。`BuildModel`（含模型訓練，每個 uuid 最多 20 輪 x 800 epochs，非常耗時）和預測 demo 都先註解掉，避免不小心觸發長時間訓練，需要的話手動打開。
 
 `server_db_path` 目前填的是 Data_Parsing_Belle.py 原本用的雲端路徑，只有在能存取那個 Google Drive 網路磁碟的電腦（例如 Belle 的工作機）才能真的觸發下載；這個容器環境沒有掛載雲端磁碟，所以雲端下載本身沒辦法在這裡驗證，只驗證了「本機已有 srj 檔」這條路徑（就是上面 2208 的實測）。
+
+# 2026/09/09 用本機既有的 10 個 uuid 跑通「資料處理 → M5 訓練」整條路徑
+
+## 背景
+DataDB 本機已經有 10 個 uuid 的 srj 檔（`2197,2199,2204,2206,2208,2210,2215,2216,2223,2249`），但 `Model/70_30/GlucoseData` 底下沒有資料，M5_DataAug.py 訓練不了。目標：讓 `Model_Builder_Predictor_Belle.py` 把這 10 個 uuid 的資料處理跑完，再確認 `M5_DataAug.py` 能吃到資料開始訓練。
+
+## 1. `Model_Builder_Predictor_Belle.py` 的 `__main__`
+- 一開始以為 `Model/Dataset/<uuid>` 已經有 `data_parsing` 算好的特徵，只差 `data_arrangement` 分 Train/Test，改成只呼叫 `data_arrangement(...)`。**結果錯了**：實際檢查 `Model/Dataset/<uuid>/High|Low|Normal` 全部是空的（只有資料夾、沒有檔案），`data_parsing` 從來沒有成功寫出過資料，所以改回呼叫完整的 `data_processing(...)`（[L2665-2669](Model_Builder_Predictor_Belle.py#L2665-L2669)），但 `server_db_path` 改成 `""`（[L2656](Model_Builder_Predictor_Belle.py#L2656)），跳過雲端下載（DataDB 本機已有 srj，不用重複抓）。
+- 修掉一個會直接讓程式崩潰的 bug：`user_information` 被改成從一份 `[uuid, start_time, end_time]` 的大清單篩選出這 10 個 uuid（[L2649-2651](Model_Builder_Predictor_Belle.py#L2649-L2651)），但迴圈原本寫 `for uuid in user_information`，篩選後每筆其實是三元素的 list，直接傳進 `os.path.join` 會丟 `TypeError: join() argument must be str, bytes, or os.PathLike object, not 'list'`。改成 `for user_info in user_information: uuid = user_info[0]`（[L2665-2666](Model_Builder_Predictor_Belle.py#L2665-L2666)）。
+- 開頭意外混入一段跟 M5_DataAug.py 一模一樣、60 幾筆帶 start_time/end_time 的舊版 `user_information` tuple 清單（[L2566-2641](Model_Builder_Predictor_Belle.py#L2566-L2641)），因為後面又被重新賦值（篩選出 10 個 uuid），這段其實是死代碼、只是視覺上很亂，先保留沒刪（純粹清單來源，不影響功能）。
+
+## 2. 效能瓶頸：記憶體不夠，8 個 process 同時載入全部 srj 導致疑似卡住
+`processnum=8` 時，`_process_rows` 裡每個 process 各自呼叫一次 `_load_all_srj_data`，把該 uuid**全部**的 srj 檔讀進記憶體。以 uuid 2197 為例，14 個 srj 檔約 2.2GB，8 個 process 同時載入 ⇒ 尖峰約 17~18GB，而這台機器（Belle 的工作機）當時只剩 3.2GB 可用記憶體（總共 31.7GB）。這解釋了「執行很久、Model 底下卻看不到新資料」的現象，很可能是在瘋狂 swap。**這次沒有調降 `processnum`**，只是把原因記錄下來；如果之後又卡住，優先檢查可用記憶體，考慮把 `processnum` 調低（例如 2）。
+
+## 3. 確認二元搜尋（bisect）已經在 `Model_Builder_Predictor_Belle.py` 裡，不用從 `Data_Parsing_Belle.py` 搬
+`_query_by_time_range`（[Model_Builder_Predictor_Belle.py:753-782](Model_Builder_Predictor_Belle.py#L753-L782)）用 `bisect.bisect_left`/`bisect_right` 在排序後的時間序列上做二元搜尋，取代逐筆線性掃描，內容跟 `Data_Parsing_Belle.py` 裡的版本一致，而且 `_process_rows`（[L172-197](Model_Builder_Predictor_Belle.py#L172-L197)）也已經在用它。額外發現：`Data_Parsing_Belle.py` 的 `_process_rows`（[L193-219](Data_Parsing_Belle.py#L193-L219)）把 `_load_all_srj_data` 放在**每一筆**血糖記錄的迴圈「裡面」呼叫，等於每筆都重讀一次全部 srj 檔——這是舊版效能 bug，`Model_Builder_Predictor_Belle.py` 已經修正成迴圈外呼叫一次（[L175](Model_Builder_Predictor_Belle.py#L175)），是兩支檔案裡效能較好的版本。
+
+## 4. 修好 `M5_DataAug.py` 讓它能夠被匯入、能夠訓練
+- **`common.py` 缺 `train_valid_split_indices`**：這是 9/8 那次合併紀錄裡提到「尚未解決」的殘留問題，`from common import (...)` 原本會直接 `ImportError`。已把 `M5_DataAug.py` 裡原本註解掉的參考實作搬進 `common.py`（依類別分層切 train/valid，避免 valid 幾乎沒有 minority class），加在 [common.py](common.py) 的 `BalancedBatchSampler` 之後。
+- **`BuildModel` 在 M5_DataAug.py 裡整段被註解掉**：`__main__` 呼叫 `BuildModel(...)` 會直接 `NameError`。已把 [M5_DataAug.py:623](M5_DataAug.py#L623) 那段舊的 `BuildModel` 恢復成可用函式，簽名簡化為 `BuildModel(uuid, base_path, splitting_ratio="70_30")`——**這支檔案本來就不做資料處理**（下載/解析/分Train-Test 交給 `Model_Builder_Predictor_Belle.py`），只檢查 `Model/70_30/GlucoseData/<uuid>/Train|Test` 裡 High/Low/Normal 資料夠不夠，自動分派到 `BuildModel_ThreeClasses`（有低血糖資料）或 `BuildModel_TwoClasses`（沒有）。
+- **`__main__` 裡一行殘留的除錯用 `continue`**：`if(uuid !='2131'): continue`（舊版），但篩選後的 `user_information` 清單裡根本沒有 `2131`，導致迴圈永遠跳過全部 10 個已經處理好的 uuid、什麼都不會訓練。已拿掉這行，並把呼叫改成新版 `BuildModel(uuid, base_path, splitting_ratio="70_30")`（[__main__](M5_DataAug.py#L1927)）。
+- 驗證：用 venv `python -c "import M5_DataAug"` 確認可以正常匯入（之前會炸掉）；沒有實際執行 `__main__`（會觸發最多 10 個 uuid、每個 20 輪 x 800 epochs 的完整訓練，太耗時）。
+
+## 5. M5_DataAug.py 目前的評估 metrics（尚未實際跑過訓練驗證數字）
+訓練完會在 `Model/70_30/Best_ThreeClasses_Model/<uuid>/`（或 `Best_TwoClasses_Model`）產出兩個檔案：`Performance_<版本>_<時間戳>.txt`（這次執行的最佳結果）與 `Historic_Best_Performance.txt`（跨執行的歷史最佳，含最佳模型檔名）。指標：Sensitivity／Specificity（各類別 TP/(TP+FN)、TN/(TN+FP) 的幾何平均 G-mean）、三分類另外列出 Normal/High/Low 各自的 Sensitivity/Specificity、F1（是 G-mean Sensitivity 與 G-mean Specificity 的調和平均，不是傳統 per-class F1）、Acc（整體正確率）、各類別 TP/FP/FN/TN。**沒有** AUC、Precision/Recall（單獨列出）、ROC curve。
+
+## 待辦／下一步
+- 還沒有真的執行過 `M5_DataAug.py` 的 `__main__`，也還沒產出任何 `Performance_*.txt` 或 `.pth`。建議先把 [__main__ 篩選清單](M5_DataAug.py#L1924) 縮小到 1 個 uuid 試跑一次，確認整條訓練流程真的能跑完、產出報告，再考慮跑全部 10 個。
+- `processnum=8` 的記憶體風險還沒解決，之後如果又出現「跑很久沒反應」，先查可用記憶體再決定要不要調低。

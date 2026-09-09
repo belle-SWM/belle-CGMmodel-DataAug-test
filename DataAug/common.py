@@ -430,6 +430,35 @@ class BalancedBatchSampler:
         return self.n_batches
 
 
+# 依類別分層切分 train / valid，避免 valid 幾乎沒有 minority class（例如 High/Low）
+# labels_array: 1D numpy array，每個元素是該筆資料的類別編號
+def train_valid_split_indices(labels_array, valid_ratio=0.1, seed=10):
+    rng = np.random.RandomState(seed)
+
+    train_idx_all = []
+    val_idx_all = []
+
+    unique_classes = np.unique(labels_array)
+    for cls in unique_classes:
+        cls_idx = np.where(labels_array == cls)[0]
+        rng.shuffle(cls_idx)
+
+        n_val = int(len(cls_idx) * valid_ratio)
+        # 至少保留 1 筆到 validation（若該類別本來有資料）
+        if len(cls_idx) > 1:
+            n_val = max(1, n_val)
+        else:
+            n_val = 0
+
+        val_idx_all.extend(cls_idx[:n_val].tolist())
+        train_idx_all.extend(cls_idx[n_val:].tolist())
+
+    rng.shuffle(train_idx_all)
+    rng.shuffle(val_idx_all)
+
+    return train_idx_all, val_idx_all
+
+
 # ─── 閾值移動（Threshold Moving）共用工具 ──────────────────────────────────
 # 在 Valid split 上，掃描候選 threshold，挑一個讓 G-mean（各類別 Sensitivity /
 # Specificity 的幾何平均）最大化的 threshold，取代預設的 0.5 / argmax，用於類別
