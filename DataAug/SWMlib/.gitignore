@@ -1,0 +1,14 @@
+__pycache__/
+.ipynb_checkpoints/
+.vscode/
+
+*.pyc
+*.pth
+/__pycache__
+*.pyc
+/arrhythmia/__pycache__
+/common/__pycache__
+/ecg/__pycache__
+/motion/ahrs/common/__pycache__
+/motion/ahrs/filters/__pycache__
+README.md

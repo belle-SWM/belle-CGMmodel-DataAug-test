@@ -195,3 +195,57 @@ def data_processing(self,uuid,srj_db_path,glucosedata_path,basepath,start_time=N
 | 1 : 1（完全平衡） | 3093 | 9.18x |
 
 **建議**：不建議直接衝到 1:1，因為 High 實際上就只有 337 筆「不重複」的原始樣本，硬過採樣到跟 Normal 一樣多，等於同一筆資料的增強版本會被重複看很多次，模型容易記住這337筆的特徵而非真的學到高血糖的通用特徵，過擬合風險高。比較穩健的做法通常抓 **3~5倍**（對應 Normal:High ≈ 3:1~5:1）之間，如果之後要做這個，需要另外實作 sampler，目前程式還沒有這部分。
+
+# 2026/09/08 合併雲端下載＋加速資料處理管線到 Model_Builder_Predictor_Belle.py
+
+## 這次做了什麼
+目的：加速 [Model_Builder_Predictor_Belle.py](Model_Builder_Predictor_Belle.py) 的資料處理部分，把 [Data_Parsing_Belle.py](Data_Parsing_Belle.py) 裡「下載雲端 zip → 解壓 → srj 解析 → 特徵擷取 → 分 Train/Test」這一整套較快的管線，整個併進 `Model_Builder_Predictor_Belle.py` 的 `DataArrangement` class，取代原本較慢的單進程版本。
+
+1. **`DataArrangement` class 整個換成新管線**：
+   - `unzip_file`：直接掃 `server_db_path` 底下檔名前綴等於 uuid 的 zip 檔解壓，取代舊版呼叫 `data_load_concate.search_unzip_file`。
+   - `data_parsing`：改用 `multiprocessing.Pool`，把血糖 CSV 的每一列切成 `processnum` 份 chunk 平行處理（`_process_rows`），每個 chunk 內對 ECG 訊號做 `baseline_remove` → `remove_spike` → `nk.ecg_clean` → `motion_analysis`（分 static/dynamic）→ `ecg_quality_check_v3` → `emg_detector_remover`，品質好的訊號才進入 `feature_extraction_from_single_ecg` 算特徵，**直接**分類寫入 Dataset 的 High/Low/Normal 資料夾，取代舊版「先把原始 ECG 全部寫檔 → 事後再讀一次做特徵擷取」的兩階段做法，省了一次完整的檔案 I/O。
+   - 順手修掉一個效能 bug：Data_Parsing_Belle.py 原本的 `_process_rows` 在**每一筆**血糖記錄都重新呼叫 `_load_all_srj_data` 重讀全部 srj 檔；改成每個 process（每個 chunk）只讀一次。
+   - `data_arrangement`／`_movedata`：依日期切 Train/Test（取代舊版依血糖值直方圖切的方式），並支援 `splitting_ratio`（例如 `"70_30"`）決定訓練集比例。
+
+2. **資料夾結構改成 `splitting_ratio` 子資料夾**（例如 `Model/70_30/GlucoseData/<uuid>/Train|Test/High|Low|Normal`），取代舊版扁平的 `Model/GlucoseData_<uuid>/...`。原因：這正是既有的 [M5_DataAug.py](M5_DataAug.py) 訓練程式期待吃到的輸入格式，對齊之後資料處理完可以直接餵給 M5 訓練，不用再搬檔案。連動修改：
+   - `BuildModel`、`BuildModel_ThreeClasses`、`BuildModel_TwoClasses`：都多了 `splitting_ratio` 參數，內部所有 `GlucoseData_`/`Best_*Model`/`Temp_*Model` 路徑都改成 `basepath/splitting_ratio/...`。
+   - `Clean_Data`、`Clean_Model`：一樣補上 `splitting_ratio` 參數。
+   - `GlucoseThreeClassesPredictor`、`GlucoseTwoClassesPredictor`、`GlucosePredictor`：建構子多了 `splitting_ratio`，預測時讀模型的路徑也一起改。
+
+3. **`__main__` 區塊**改成用 `Path(__file__)` 相對路徑（`Model/`、`GlucoseDataCSV/`、`DataDB/<uuid>`），不再寫死 Windows 專屬路徑，並示範新的呼叫方式：
+   ```python
+   status, errorcode, message = BuildModel(
+       uuid, basepath, srj_db_path, glucosedata_path,
+       server_db_path,   # 本機已有 srj 檔就填 ""，跳過雲端下載
+       processnum,       # 平行處理程序數，是加速的關鍵旋鈕，依CPU核心數調整
+       splitting_ratio,  # 例如 "70_30"
+   )
+   ```
+
+## 環境修復（合併過程中發現、跟這次程式改動本身無關）
+1. **`SWMlib` 是舊版，缺新管線需要的函式**：`motion_analysis`、`ecg_quality_check_v3`、`normalization`、`remove_spike`、`emg_detector_remover` 在原本的 [SWMlib/](SWMlib/) 裡都不存在。已從 `/share/Ivy/bgm_cls/SWMlib`（同事 Ivy 的新版）整份複製過來覆蓋，舊版備份在 `SWMlib.bak_pre_sync_20260908092615/`，之後確認沒問題可以刪除。
+2. **缺頂層 `common.py`**：[M5_DataAug.py](M5_DataAug.py) 有 `from common import (...)`，但這個 repo 原本沒有這個檔案。已從 `/share/Ivy/bgm_cls/common.py` 複製過來。
+3. **殘留問題，尚未解決**：複製過來的 `common.py` 版本比 `M5_DataAug.py` 預期的舊，裡面缺少 `train_valid_split_indices` 這個函式，所以 `import M5_DataAug` 目前還是會炸（`ImportError: cannot import name 'train_valid_split_indices'`）。這個跟這次「合併資料處理管線」的任務無關，之後要跑 M5 訓練前需要再跟 Ivy 對版本，或請她補這個函式到 common.py。
+
+## 驗證
+- `python -m py_compile Model_Builder_Predictor_Belle.py`：通過。
+- `import Model_Builder_Predictor_Belle`：SWMlib 更新後可以正常 import（改動前會因為缺函式直接炸）。
+- 之後有實際拿 uuid `2208` 跑過一次完整的 `DataArrangement.data_processing(...)`（見下一節），驗證了資料處理管線本身可以正常跑完、產出正確的 Train/Test 資料夾結構。
+
+## 實測：uuid 2208 資料處理（本機已有 srj，未含雲端下載）
+資料規模：`DataDB/2208` 306 個 srj 檔、共 1.5GB；`GlucoseDataCSV/2208.csv` 1267 筆血糖記錄。`processnum=8`、`splitting_ratio="70_30"`，`server_db_path=""`（本機已有 ECG，跳過雲端下載）。
+
+- 耗時：485 秒（≈8 分鐘），`errorcode="0"`。
+- 產出 `Model/70_30/GlucoseData/2208/`：
+  | | High | Low | Normal |
+  |---|---|---|---|
+  | Train | 195 | 431 | 706 |
+  | Test | 76 | 222 | 227 |
+- `Model/RawData/2208` 累積 8501 筆通過品質檢查的 ECG 片段（`Model/Dataset/2208/*` 在 `data_arrangement` 之後會被清空，因為檔案都被搬到上面的 Train/Test 資料夾了，這是正常現象）。
+- 三個類別（High/Low/Normal）在 Train/Test 都有資料，代表這個 uuid 可以直接用 `BuildModel_ThreeClasses` 訓練三分類模型。
+- 觀察到的效能瓶頸：8 個 process 各自獨立載入完整的 306 個 srj 檔進記憶體（`_load_all_srj_data` 設計上是每個 process 各載入一次），2208 這個案例每個 process 吃到約 9GB RAM。之後如果遇到 srj 檔案量更大的 uuid，記憶體可能會是比 CPU 更早撞到的瓶頸，需要視情況調低 `processnum`。
+
+## `__main__` 改成批次下載＋處理迴圈
+把原本單一 uuid 的示範，改成依 `GlucoseDataCSV` 現有的全部 10 個 uuid（`2197,2199,2204,2206,2208,2210,2215,2216,2223,2249`）跑 `DataArrangement.data_processing(...)`（只做下載+資料處理，**不含模型訓練**）。`BuildModel`（含模型訓練，每個 uuid 最多 20 輪 x 800 epochs，非常耗時）和預測 demo 都先註解掉，避免不小心觸發長時間訓練，需要的話手動打開。
+
+`server_db_path` 目前填的是 Data_Parsing_Belle.py 原本用的雲端路徑，只有在能存取那個 Google Drive 網路磁碟的電腦（例如 Belle 的工作機）才能真的觸發下載；這個容器環境沒有掛載雲端磁碟，所以雲端下載本身沒辦法在這裡驗證，只驗證了「本機已有 srj 檔」這條路徑（就是上面 2208 的實測）。

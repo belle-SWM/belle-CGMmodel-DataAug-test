@@ -20,7 +20,7 @@ References
 """
 
 import numpy as np
-from scipy import sqrt
+#from scipy import sqrt
 from ..common.mathfuncs import *
 
 # Reference Observations in Munich, Germany

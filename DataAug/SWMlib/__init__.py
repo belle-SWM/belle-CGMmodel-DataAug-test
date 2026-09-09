@@ -3,7 +3,7 @@
 
 """This script allow user to import directly the most useful functions."""
 
-__version__ = "1.0.0"
+__version__ = "1.0.2"
 
 from .arrhythmia import *
 from .common import *

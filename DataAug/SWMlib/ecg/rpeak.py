@@ -6,6 +6,7 @@ import math
 from ..common.filters import mean_filter
 import neurokit2 as nk
 from scipy.signal import find_peaks, butter, filtfilt
+import pandas as pd
 
 
 def _find_max(indexs, values):
@@ -613,9 +614,13 @@ def rpeak_detection(ecg_data,measuring_mode='strap',method_type='vg',mode='revis
                     scale=6
 
                 clean_ecg=clean_ecg*scale               
-
-                signals, info = nk.ecg_peaks(clean_ecg, sampling_rate=250, correct_artifacts=False, method='neurokit')
-                rpeaks = _check_r_peak(clean_ecg, info["ECG_R_Peaks"]) 
+                try:                    
+                    signals, info = nk.ecg_peaks(clean_ecg, sampling_rate=250, correct_artifacts=False, method='neurokit')
+                    rpeaks = _check_r_peak(clean_ecg, info["ECG_R_Peaks"])
+                except:
+                    rpeaks=rpeak_detection_bandpass(ecg_data,mode)      
+                    rpeaks=rpeaks[1:]
+              
             else:
                 rpeaks=np.array([])
 
@@ -632,3 +637,487 @@ def rpeak_detection(ecg_data,measuring_mode='strap',method_type='vg',mode='revis
         rpeaks_final=rpeak_detection_patch(ecg_data)
     
     return rpeaks_final
+
+
+def _phasor_trans(cleaned: np.ndarray, Rv: float):
+    """
+    input ---
+        cleaned: ECG signal after cleaned
+        Rv: the constant in phasor transform formula, smaller value will results more sensitive to wide peaks
+    output ---
+        pt: phasor transformed array
+    """
+    pt=np.array([math.atan(i/Rv) for i in cleaned])
+    return(pt)
+
+def _peak_widths_heights(cleaned:np.ndarray, peaks:np.ndarray, mode:str='slope', slope_c:float=0.9):
+    """
+    for each peak, find its left and right edge by selected mode, then return widths, height, and height/width ratio
+    input --
+        cleaned: ECG signal after cleaned
+        peaks: detected peak array
+        mode: 'slope' or not
+        slope_c: slope constant for define peak edge
+    output --
+        widths: widths array of peak array
+        heights: height array of peak array
+        ratio: height/width ratio array of peak array
+    """
+
+    widths=np.zeros_like(peaks)+1
+    heights_l=np.zeros_like(peaks, dtype=float)
+    heights_r=np.zeros_like(peaks, dtype=float)
+
+    ### peak ends at any slope not steep anymore
+    if mode == 'slope':
+        for i, peak in enumerate(peaks):
+            ## find left edge
+            x=peak-1
+            while x>0:
+                if (cleaned[x]-cleaned[x-1])>=(cleaned[x+1]-cleaned[x])*slope_c:
+                    widths[i]+=1
+                    x-=1
+
+                else:
+                    break
+            
+            heights_l[i]=cleaned[peak]-cleaned[x]
+            
+            ## find right edge
+            x=peak+1
+            while x <len(cleaned)-1:
+                if (cleaned[x]-cleaned[x+1])>=(cleaned[x-1]-cleaned[x])*slope_c:
+                    widths[i]+=1
+                    x+=1
+                else:
+                    break
+
+            heights_r[i]=cleaned[peak]-cleaned[x]
+
+        heights=np.max([heights_l, heights_r], axis=0)
+
+    ### peak ends at any slope start to raise
+    else:
+        for i, peak in enumerate(peaks):
+            ## find left edge
+            x=peak-1
+            while x>0:
+                if cleaned[x+1]>=cleaned[x]:
+                    widths[i]+=1
+                    x-=1
+
+                else:
+                    break
+
+            heights_l[i]=np.round(cleaned[peak]-cleaned[x], 3)
+            
+            ## find right edge
+            x=peak+1
+            while x <len(cleaned):
+                if cleaned[x-1]>=cleaned[x]:
+                    widths[i]+=1
+                    x+=1
+
+                else:
+                    break
+
+            heights_r[i]=np.round(cleaned[peak]-cleaned[x], 3)
+
+        heights=np.max([heights_l, heights_r], axis=0)
+    
+    ratio=np.round(heights/widths*100, 3)
+
+    return ratio
+
+
+def _do_pt_thres(cleaned, pt, pt_thres, sampling_rate, step=0.2):
+    """
+    input --
+        cleaned: ECG signal after cleaned
+        pt: phasor transformed array
+        pt_thres: threshold for determining peak range
+        sampling_rate: sampling rate of ECG signal
+        step: pt_thres will decrease step each loop
+    output --
+        peaks: detected peak array
+    """
+    end=[]        
+    length=len(cleaned)
+    while (len(end)<=int(length/sampling_rate/1.5)) & (pt_thres>0.5):
+        b=pt>=pt_thres
+        start=np.where(np.diff([int(i) for i in b])==1)[0]
+        end=np.where(np.diff([int(i) for i in b])==-1)[0]
+
+        if len(end):
+            if end[0]<start[0]:
+                end=end[1:]
+
+            if len(end)==0:
+                break
+
+        if len(start):
+            if len(start)>len(end):
+                start=start[:len(end)]
+
+            if len(start)==0:
+                break
+
+        pt_thres-=step
+    
+    if len(end):
+        ### peak is max of every (start, end) interval 
+        peaks=np.array([np.argmax(cleaned[start[i]:end[i]]) for i in range(len(end))])+start
+        return(peaks)
+    else:
+        return([])
+
+
+def _do_pt_thres_r(cleaned, cleaned_r, pt_r, pt_thres, sampling_rate, step=0.2, mode:str='slope', slope_c:float=0.9):
+    """
+    input ---
+        cleaned: ECG signal after cleaned
+        cleaned_r: negative ECG signal after cleaned
+        pt_r: negative phasor transformed array
+        pt_thres: threshold for determining peak range
+        sampling_rate: sampling rate of ECG signal
+        step: pt_thres will decrease step each loop
+        mode: 'slope' or not
+        slope_c: slope constant for define peak edge
+    output ---
+        min_p: detected valley array
+        max_p_r: peak array that reversed from vallet 
+    """
+    min_p = _do_pt_thres(cleaned_r, pt_r, pt_thres, sampling_rate, step)
+    
+    if len(min_p):
+        max_p_r=_reversed_peaks(cleaned, min_p, mode, slope_c)
+        return(min_p, max_p_r)
+    
+    else:
+        return([], [])
+
+        
+def _reversed_peaks(cleaned, min_p, mode:str='slope', slope_c:float=0.9):
+    """
+    input ---
+        cleaned: ECG signal after cleaned
+        min_p: detected valley array
+        mode: 'slope' or not
+        slope_c: slope constant for define peak edge
+    output ---
+        max_p_r: peak array that reversed from vallet 
+    """
+    
+    ### peak is at any slope not steep anymore
+    if mode == 'slope':
+        max_p_r=np.zeros_like(min_p)
+        for i, p in enumerate(min_p):
+            ## find peak left to valley 
+            x=p-1
+            while x>0:
+                if (((cleaned[x]-cleaned[x-1])>=(cleaned[x+1]-cleaned[x])*slope_c) or (cleaned[x-1]-cleaned[x]>2)):
+                    x-=1
+
+                else:
+                    max_p_r[i]=x
+                    break
+
+        return(max_p_r.astype('int'))
+    
+    ### peak is at any slope start to decrease
+    else:
+        max_p_r=np.zeros_like(min_p)
+        for i, p in enumerate(min_p):
+            ## find peak left to valley 
+            x=p-1
+            while x>0:
+                if cleaned[x+1]>=cleaned[x]:
+                    x-=1
+
+                else:
+                    max_p_r[i]=x
+                    break
+
+        return(max_p_r.astype('int'))
+   
+def _ostu_filtering(peaks, min_peak, max_peak, sorted_index, sorted_ratio):
+    """
+    input ---
+        peaks: detected peak array
+        min_peak: min numbers of peak
+        max_peak: max numbers of peak
+        sorted_index: argsort(ratio) where ratio is height/weight ratio array
+        sorted_ratio: sort(ratio) where ratio is height/weight ratio array
+    output ---
+        Rpeaks: filtered Rpeaks array
+    """
+    start_idx=np.max([len(peaks)-max_peak, 0])
+    end_idx=len(peaks)-min_peak
+    std_array=np.zeros(end_idx-start_idx)
+
+    for r in range(start_idx, end_idx):
+        i=r-start_idx
+        if r<=2:
+            std_array[i]=np.std(sorted_ratio[r:], ddof=1)
+
+        else:
+            std_array[i]=np.std(sorted_ratio[:r], ddof=1)+np.std(sorted_ratio[r:], ddof=1)
+
+    ratio_divide = np.argmin(std_array)+start_idx
+    Rpeaks=np.sort(peaks[sorted_index[ratio_divide:]])
+    return Rpeaks
+
+def _standard_rri_filtering(peaks, length, min_peak, max_peak, sorted_index):
+    """
+    input ---
+        peaks: detected peak array
+        length: length of ECG array
+        min_peak: min numbers of peak
+        max_peak: max numbers of peak
+        sorted_index: argsort(ratio) where ratio is height/weight ratio array
+    output ---
+        Rpeaks: filtered Rpeaks array
+    """
+
+    start_idx=np.max([len(peaks)-max_peak, 0])
+    end_idx=len(peaks)-min_peak
+    rri_dist=np.zeros(end_idx-start_idx)
+
+    for r in range(start_idx, end_idx):
+        i=r-start_idx
+        g=np.sort(peaks[sorted_index[r:]])
+        rri=np.diff(g)
+
+        ## temporary standard rri in order to insert missing R
+        standard_rri=length/len(g)
+
+        ## consider as missed first R
+        if g[0]>2*standard_rri:
+            g=np.insert(g, 0, 0)
+
+        ## consider as missed last R
+        if length-g[-1]>2*standard_rri:
+            g=np.insert(g, -1, length)
+
+        ## actual standard rri
+        standard_rri=(g[-1]-g[0])/(len(g)-1)
+        rri_dist[i]=(np.sum(np.abs(rri-standard_rri))/len(g)/standard_rri)
+
+    ratio_divide = np.argmin(rri_dist)+start_idx
+    Rpeaks=np.sort(peaks[sorted_index[ratio_divide:]])
+    return Rpeaks
+
+def _filtering(filter, peaks, length, sorted_index, sorted_ratio, sampling_rate, ratio, cleaned):
+    """
+    input ---
+        filter: selected filter type
+        peaks: detected peak array
+        length: length of ECG array
+        sorted_index: argsort(ratio) where ratio is height/weight ratio array
+        sorted_ratio: sort(ratio) where ratio is height/weight ratio array
+        sampling_rate: sampling rate of ECG signal
+        ratio: height/width ratio array of peak array
+        cleaned: ECG signal after cleaned
+    output ---
+        Rpeaks: filtered Rpeaks array
+    """
+    min_peak=int(length//sampling_rate/60*40)
+    max_peak=int(length//sampling_rate/60*240)
+
+    if filter=='no' or len(peaks)<=min_peak:
+        Rpeaks=peaks
+
+    elif filter=='ostu':
+        Rpeaks=_ostu_filtering(peaks, min_peak, max_peak, sorted_index, sorted_ratio)
+
+    elif filter=='standard_rri':
+        Rpeaks=_standard_rri_filtering(peaks, length, min_peak, max_peak, sorted_index)
+
+    elif filter=='mix':
+        Rpeaks=_ostu_filtering(peaks, min_peak, max_peak, sorted_index, sorted_ratio)
+        if len(Rpeaks)==len(peaks):
+            Rpeaks=_standard_rri_filtering(peaks, length, min_peak, max_peak, sorted_index)
+    
+    while sum(np.diff(Rpeaks)<sampling_rate//4):
+        mask=np.ones_like(Rpeaks)
+
+        ## all rri <1/4s =<0.25s
+        for i in np.where(np.diff(Rpeaks)<sampling_rate//4)[0]:
+            ## if two ratio show huge difference
+            if abs(ratio[i]-ratio[i+1])/(ratio[i]+ratio[i+1])<0.2:
+                ## compare their actual ECG value and keep the higher peak
+                rrr=cleaned[Rpeaks[i:i+2]]
+
+            else:
+                ## else compare their ratio and keep the steeper peak
+                rrr=ratio[i:i+2]
+
+            mask[i+np.argmin(rrr)]=0
+
+        Rpeaks=np.array([Rpeaks[i] for i in range(len(Rpeaks)) if mask[i]==1])
+    
+    return Rpeaks
+
+def rpeak_detection_pt(signals, sampling_rate=250, crop_time=10, overlap_time=1, Rv=0.1, pt_thres=0.9, mode='slope', slope_c=0.9, filter='mix'):
+    """
+    input ---
+        signals: raw ECG array
+        sampling_rate: sampling rate of ECG signal
+        crop_time: crop signal to be one with length of crop_time
+        overlap_time: overlapping time for both margins of cropped segment
+        Rv: the constant in phasor transform formula, smaller value will results more sensitive to wide peaks
+        pt_thres: threshold for determining peak interval
+        mode: used to check the starting and end point of R peak wave. Two modes: 'slope' or not
+        slope_c: slope constant for mode 'slope'
+        filter: selected filter type
+    output ---
+        allR: final Rpeaks array corresponding to raw ECG signals
+    """
+    cleaned=nk.ecg_clean(signals, sampling_rate=sampling_rate, method='neurokit')
+    pt=_phasor_trans(cleaned, Rv)
+    segment_num=int(np.floor(len(signals)/crop_time//sampling_rate))
+    allR=[]
+
+    for c in range(segment_num+1):
+        (s, e) = (sampling_rate*crop_time*c, sampling_rate*crop_time*(c+1))
+        if (c==segment_num):
+            if (len(signals)>sampling_rate*crop_time*segment_num):
+                e=len(signals)
+            else:
+                break
+        
+        ## 邊界放寬overlap_time秒，目的是偵測邊界上的Rpeak
+        s_window=np.max([s-sampling_rate*overlap_time, 0])
+        e_window=np.min([e+sampling_rate*overlap_time, len(signals)])
+        length=int((e_window-s_window))
+        
+        seg_cleaned=cleaned[s_window:e_window]
+        seg_pt=pt[s_window:e_window]
+        max_p=_do_pt_thres(seg_cleaned, seg_pt, pt_thres, sampling_rate)
+        
+        seg_cleaned_r=-seg_cleaned
+        seg_pt_r=-seg_pt
+        (min_p, max_p_r)=_do_pt_thres_r(seg_cleaned, seg_cleaned_r, seg_pt_r, pt_thres, sampling_rate, mode=mode, slope_c=slope_c)
+
+        ratio_r=_peak_widths_heights(seg_cleaned, max_p, mode=mode, slope_c=slope_c)
+        ratio_l=_peak_widths_heights(seg_cleaned_r, min_p, mode=mode, slope_c=slope_c)
+
+        peaks=np.sort(np.concatenate((max_p, max_p_r)))
+        sorted_signal=np.argsort(np.concatenate((max_p_r, max_p)))
+        ratio=np.concatenate((ratio_l, ratio_r))[sorted_signal]
+
+        ## two too closed R peaks should be same peak
+        while sum(np.diff(peaks)<5):
+            mask=np.ones_like(peaks)
+            for i in np.where(np.diff(peaks)<sampling_rate//4)[0]:
+                if abs(ratio[i]-ratio[i+1])/(ratio[i]+ratio[i+1])<0.2:
+                    rrr=seg_cleaned[peaks[i:i+2]]
+
+                else:
+                    rrr=ratio[i:i+2]
+
+                mask[i+np.argmin(rrr)]=0
+
+            peaks=np.array([peaks[i] for i in range(len(peaks)) if mask[i]==1])
+            ratio=np.array([ratio[i] for i in range(len(ratio)) if mask[i]==1])
+        
+        sorted_ratio=np.sort(ratio)
+        sorted_index=np.argsort(ratio)
+        
+        Rpeaks=_filtering(filter, peaks, length, sorted_index, sorted_ratio, sampling_rate, ratio, seg_cleaned)
+          
+        Rpeaks=Rpeaks[(Rpeaks>-s_window+s) * (Rpeaks<e-e_window+length)]
+        allR.extend(list(Rpeaks+s_window))
+
+    return(allR)   
+
+
+def predictDataset():
+    ## input path
+    save_root=r'res'
+    '''
+    dataset='MIT-BIH'
+    signal_path=r"MIT-BIH\Processed\MIT-BIH-A-*-Sample.txt"
+    sample_path=r"MIT-BIH\Processed\MIT-BIH-A-*-Sample.txt"
+    symbol_path=r"MIT-BIH\Processed\MIT-BIH-A-*-Symbol.txt"
+    '''
+    '''
+    dataset='NST'
+    signal_path=r"NST\Processed\MIT-BIH-A-*-Signal.txt"
+    sample_path=r"NST\Processed\MIT-BIH-A-*-Sample.txt"
+    symbol_path=r"NST\Processed\MIT-BIH-A-*-Symbol.txt"
+    '''
+    
+    dataset='AHA'
+    signal_path=r"AHA\Processed\ECG_1_*.txt"
+    sample_path=r"AHA\Processed\*-Sample.txt"
+    symbol_path=None
+
+    # can change parameters
+    filter='mix'    # ['no', 'ostu', 'standard_rri']
+    crop_time=10
+    peak_tolerance_sec=0.1
+    Rv=0.1            # larger alpha will results insensitive to wide peaks
+    pt_thres=np.pi/2-0.6    # higher threshold will results insensitive to wide peaks
+    mode='slope'
+    slope_c=0.9
+
+    ## no need to change
+    import os
+    from glob import glob
+    import json
+
+    if dataset=='MIT-BIH':
+        sampling_rate=360
+        fn_slice_s=10
+        fn_slice_e=-11
+    elif dataset=='NST':
+        sampling_rate=360
+        fn_slice_s=10
+        fn_slice_e=-11
+    elif dataset=='AHA':
+        sampling_rate=360
+        fn_slice_s=6
+        fn_slice_e=10
+
+    print('Input database: ', dataset)
+    print('Save result in: ', os.path.join(os.getcwd(), save_root))
+
+    signal_files = sorted(glob(signal_path))
+    if sample_path is not None:
+        sample_files = sorted(glob(sample_path))
+    if symbol_path is not None:
+        symbol_files = sorted(glob(symbol_path))
+
+    if not os.path.exists(save_root):
+        os.makedirs(save_root)
+
+    for idx in range(len(signal_files)):
+
+        file=signal_files[idx]
+        print('Processing', os.path.basename(file))
+        signals=np.array(pd.read_csv(signal_files[idx], header=None)).ravel()
+        if sample_path is not None:
+            assert len(sample_files) == len(signal_files), 'not corresponding sample file'
+            sample=np.array(pd.read_csv(sample_files[idx], header=None)).ravel()
+        if symbol_path is not None:
+            assert len(symbol_files) == len(signal_files), 'not corresponding symbol file'
+            symbol=np.array(pd.read_csv(symbol_files[idx], header=None, quotechar="'")).ravel()
+            ignore=np.array([i in ['Q', '+', 'x', '[', ']', 'p', '(N', '(P', '(B', '(VT', '(T', '(SVTA', '(IVR', '(NOD', '(AFIB', '(AFL', '(VFL', '(AB', '(PREX', '(BII', '(SBR', '|', '~', '"'] for i in symbol])
+            sample=sample[~ignore]
+        fn=os.path.basename(signal_files[idx])[fn_slice_s:fn_slice_e]
+        p=rpeak_detection_pt(signals, sampling_rate, crop_time, Rv, pt_thres, mode, slope_c, 'mix')
+        d={
+            "dataset": dataset, 
+            "signal_path": file, 
+            "peak_tolerance_sec": peak_tolerance_sec, 
+            "Rv": Rv, 
+            "pt_thres": pt_thres, 
+            "crop_time": crop_time,
+            "find_peak_mode": mode, 
+            "slope_constant": slope_c,
+            "r_peaks": p
+        }
+        with open(os.path.join(save_root, fn+'.json'), mode='w') as f:
+                f.write(json.dumps(d, indent=4, default=str))
+    return 0

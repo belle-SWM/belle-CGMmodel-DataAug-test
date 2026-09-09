@@ -6,6 +6,7 @@ import time
 from scipy.fftpack import fft
 import pywt
 import torch
+import neurokit2 as nk
 from torch.utils.data.dataset import Dataset
 from torch.utils.data import DataLoader
 import torch.optim as optim
@@ -18,6 +19,9 @@ import math
 import glob
 import csv
 from time import strftime
+from zipfile import ZipFile
+from multiprocessing import Pool
+from pathlib import Path
 import bisect
 
 if os.path.dirname(__file__) not in sys.path:
@@ -25,379 +29,403 @@ if os.path.dirname(__file__) not in sys.path:
 
 from SWMlib.motion import *  ##ahrs
 from SWMlib.motion import static_motion_analysis
-from SWMlib.ecg.rpeak import rpeak_detection 
-from SWMlib.ecg.quality_check import ecg_quality_check 
-from SWMlib.common import data_load_concate  
+from SWMlib.motion import motion_analysis
+from SWMlib.ecg.rpeak import rpeak_detection
+from SWMlib.ecg.quality_check import ecg_quality_check
+from SWMlib.ecg.quality_check import ecg_quality_check_v3
+from SWMlib.common import data_load_concate
+from SWMlib.common.calculation import normalization
+from SWMlib.ecg.baseline import baseline_remove
+from SWMlib.ecg.noise_remove import remove_spike, emg_detector_remover
 
 def get_version(): ###取得版本號
 
-    return '006'
+    return '007'
 
 class DataArrangement:
 
     def __init__(self):
-        self.basepath = os.path.dirname(__file__)      
+        self.basepath = os.path.dirname(__file__)
 
-    def unzip_file(self,uuid,start_time,end_time,db_path,export_path):  ####將受測者zip檔解壓縮
 
-        uuid_export_path = os.path.join(export_path, uuid)        
-        if not os.path.exists(uuid_export_path): 
-            os.makedirs(uuid_export_path)      
-       
-        UnzipFileNameList = data_load_concate.search_unzip_file(db_path=db_path, target_uuid=uuid, start_time=start_time, end_time=end_time, export_path=uuid_export_path)   
+    def unzip_file(self,uuid,server_db_path,export_path):  ####將受測者zip檔解壓縮
 
-    
-    ##def data_processing(self,uuid,start_time,end_time,srj_db_path,glucosedata_path,basepath,server_db_path): ##測試用
-    def data_processing(self,uuid,srj_db_path,glucosedata_path,basepath,start_time=None,end_time=None,server_db_path=""):
+        uuid_export_path = os.path.join(export_path, uuid)
+        if not os.path.exists(uuid_export_path):
+            os.makedirs(uuid_export_path)
+
+        zipfile_list=os.listdir(server_db_path)
+        for zipfilename in zipfile_list:
+            file_name_split_array=zipfilename.split('_')
+            if (file_name_split_array[0]==uuid):
+                print('zipped file name:',os.path.join(server_db_path,zipfilename))
+                with ZipFile(os.path.join(server_db_path,zipfilename),"r") as zip:
+                    zip.extractall(export_path)  ##export srj files in the path
+
+
+    def data_processing(self,uuid,srj_db_path,glucosedata_path,base_path,server_db_path,processnum,splitting_ratio): ##測試用
 
         errorcode="0"
         message=""
 
         ##測試用
-
         if(server_db_path!=""):  ###測試用,需要抓雲端上的zip檔案
             print('Start unzippig file!')
-            self.unzip_file(uuid,start_time,end_time,server_db_path,srj_db_path) ##自雲端資料夾中將ECG壓縮檔解壓縮成srj檔放置到srj_db_path路徑下
+            self.unzip_file(uuid,server_db_path,srj_db_path) ##自雲端資料夾中將ECG壓縮檔解壓縮成srj檔放置到srj_db_path路徑下
 
 
         print('Start data parsing！')
-        errorcode, message = self.data_parsing(uuid,srj_db_path,glucosedata_path,basepath) ##srj檔分析後將ECG資料放置於export_txtfile_path路徑下
-        if int(errorcode)<0:
-            return errorcode, message
-
-
-        print('Start feature extracting!')
-        errorcode, message = self.feature_extraction(uuid,basepath) ##擷取ECG特徵
+        print(glucosedata_path)
+        errorcode, message = self.data_parsing(uuid,srj_db_path,glucosedata_path,base_path,processnum) ##srj檔分析後將ECG資料放置於base_path\RawData路徑上
         if int(errorcode)<0:
             return errorcode, message
 
 
         print('Start data arrangement!')
-        errorcode, message = self.data_arrangement(uuid,glucosedata_path,basepath)
+        errorcode, message = self.data_arrangement(uuid,base_path,splitting_ratio) ##根據splitting_ratio，將Dataset資料夾中血糖值分配至trainning和testing dataset
         if int(errorcode)<0:
             return errorcode, message
 
         message="data processing is done!"
 
         return errorcode, message
-    
-    def data_parsing(self,uuid,srj_db_path,glucosedata_path,export_txtfile_path): 
+
+
+    def data_parsing(self,uuid,srj_db_path,glucosedata_path,base_path,processnum=8):
+
+        '''
+        srj檔分析得到的每一段ECG訊號直接計算出每一個R波峰值附近的特徵，根據血糖值放置於Dataset中的高中低
+        '''
+        errorcode="0"
+        message=""
+
+        export_rawdata_path=os.path.join(base_path,"RawData")
+        if not os.path.exists(export_rawdata_path):
+            os.makedirs(export_rawdata_path) ###創建ECG擷取後存放資料夾
+
+        uuid_temp_path = os.path.join(export_rawdata_path, uuid)
+        if not os.path.exists(uuid_temp_path):
+            os.makedirs(uuid_temp_path) ### 創建屬於uuid的資料夾
+
+        ###  EMG測試用
+        high_emg_datapath=os.path.join(base_path,"high_emg_data")
+        if not os.path.exists(high_emg_datapath):
+            os.makedirs(high_emg_datapath) ###創建ECG擷取後存放資料夾
+
+        uuid_high_emg_noise_path = os.path.join(high_emg_datapath, uuid)
+        if not os.path.exists(uuid_high_emg_noise_path):
+            os.makedirs(uuid_high_emg_noise_path) ### 創建屬於uuid的資料夾
+        ## EMG測試用結束
+
+        features_path=os.path.join(base_path, "Features")  ##創建特徵檔案資料夾
+        if not os.path.exists(features_path): os.makedirs(features_path)
+
+        features_uuid_path=os.path.join(features_path,uuid)
+        if not os.path.exists(features_uuid_path): os.makedirs(features_uuid_path)
+
+
+        dataset_path=os.path.join(base_path,"Dataset") ##創建Dataset資料夾
+        if not os.path.exists(dataset_path): os.makedirs(dataset_path)
+
+        dataset_uuid_path_high=os.path.join(dataset_path,uuid,'High')
+        if not os.path.exists(dataset_uuid_path_high): os.makedirs(dataset_uuid_path_high)
+
+        dataset_uuid_path_low=os.path.join(dataset_path,uuid,'Low')
+        if not os.path.exists(dataset_uuid_path_low): os.makedirs(dataset_uuid_path_low)
+
+        dataset_uuid_path_normal=os.path.join(dataset_path,uuid,'Normal')
+        if not os.path.exists(dataset_uuid_path_normal): os.makedirs(dataset_uuid_path_normal)
+
+        glucosedata_path=os.path.join(glucosedata_path,uuid+'.csv')
+        glucose_csv_file_list=glob.glob(glucosedata_path)
+        ecgdata_path=os.path.join(srj_db_path,'*.srj')
+        srj_file_list=glob.glob(ecgdata_path)
+
+        if(len(glucose_csv_file_list)==0):
+            errorcode="-102"
+            message="An error occurs in the data-parsing function of Model_Builder_Predictor_Belle.py: no glucose csv files exist!"
+            return errorcode, message
+
+
+        ##try:
+        if(True):
+            with open(glucose_csv_file_list[0], newline='', encoding='utf-8-sig') as f:
+                rows = list(csv.reader(f, delimiter=','))
+                chunks = self._split_chunks(rows,processnum)
+                args_list = [(chunk, srj_db_path, srj_file_list, uuid, uuid_temp_path, features_uuid_path,dataset_uuid_path_high,dataset_uuid_path_low,dataset_uuid_path_normal) for chunk in chunks]
+
+                with Pool(processes=processnum) as pool:
+                    pool.starmap(self._process_rows, args_list)
+
+            f.close()
+
+            self.leftover_feature_to_category(features_uuid_path,dataset_uuid_path_low,dataset_uuid_path_high,dataset_uuid_path_normal)  ##將剩餘的feature搬移到Dataset資料夾
+
+        ##except:
+        ##    errorcode="-103"
+        ##    message="An error occurs in the data-parsing function of Model_Builder_Predictor_Belle.py: fail to do multiprocessing analysis!"
+        ##    return errorcode, message
+
+        return errorcode, message
+
+
+    def _process_rows(self,chunk_rows, srj_db_path, srj_file_list, uuid, uuid_temp_path, features_uuid_path,dataset_uuid_path_high,dataset_uuid_path_low,dataset_uuid_path_normal):
+
+        ##整個chunk(單一process)只需要載入一次srj資料，避免每一筆血糖記錄都重新掃描檔案
+        sorted_times, ecg_data_all, motion_data_all, breath_data_all, temp_data_all = self._load_all_srj_data(srj_db_path, srj_file_list, uuid)
+
+        for row in chunk_rows:
+            recored_time = row[0]
+            glucose_value = row[1]
+            if glucose_value != "":
+
+                datetime_object = datetime.strptime(recored_time[2:], '%y/%m/%d %H:%M')
+
+                if int(glucose_value) >= 250:
+                    time_change = timedelta(minutes=10)
+                elif int(glucose_value) >= 200:
+                    time_change = timedelta(minutes=7)
+                else:
+                    time_change = timedelta(minutes=5)
+
+                new_time_before = datetime_object - time_change
+                new_time_after = datetime_object + time_change
+                current_time_str = datetime_object.strftime("20%y%m%d %H%M%S")
+                start_time_str = new_time_before.strftime("20%y%m%d %H%M%S")
+                end_time_str = new_time_after.strftime("20%y%m%d %H%M%S")
+
+                ecg_data_array, motion_data_array, breath_data_array, temp_data_array = self._query_by_time_range(sorted_times, ecg_data_all, motion_data_all, breath_data_all, temp_data_all, start_time_str, end_time_str)
+
+                end_index=len(ecg_data_array)
+                for i in range(end_index):
+                    current_motion_data=motion_data_array[i]
+                    if(len(current_motion_data)==0): ##如果為空，逃避ECG片段
+                        continue
+
+                    current_ecg_data=ecg_data_array[i]
+                    flag = motion_analysis(motion_data=current_motion_data)
+
+                    if (flag==0):  ##static
+
+                        current_ecg_data=baseline_remove(current_ecg_data)  ##新增基線漂移校正
+                        current_ecg_data = remove_spike(current_ecg_data, spike_threshold=500.0, fs=250)
+                        ecgs_10s_vg=nk.ecg_clean(current_ecg_data, sampling_rate=250, method="vg")
+                        rpeak_array=rpeak_detection(ecgs_10s_vg)[1:]
+                        result = ecg_quality_check_v3(current_ecg_data, rpeak_array)
+
+                        if result == "Normal":
+                            ecg_norm=normalization(current_ecg_data)
+                            clean_signal,high_noise_rpeak_indices=emg_detector_remover(ecg_norm, rpeak_array)
+                            if(len(clean_signal)>0): ##低雜訊過關
+                                current_time_str=current_time_str.replace(" ","")
+                                filename=uuid+'_'+current_time_str+'_0_'+str(i)+'_'+glucose_value+'.txt'
+                                self._write_ecg_data(uuid=uuid, ecg_data_array=current_ecg_data, time_str=current_time_str, flag=0, index=i, glucose_value=glucose_value, uuid_temp_path=uuid_temp_path)
+                                self.feature_extraction_from_single_ecg(current_ecg_data,rpeak_array,int(glucose_value),filename,features_uuid_path,dataset_uuid_path_high,dataset_uuid_path_low,dataset_uuid_path_normal) ###直接計算特徵並寫入到Features資料夾
+
+                            else:
+                                high_emg_datapath=os.path.join(os.path.dirname(uuid_temp_path).replace("RawData","high_emg_data"))
+                                uuid_high_emg_noise_path = os.path.join(high_emg_datapath, uuid)
+                                if not os.path.exists(uuid_high_emg_noise_path):
+                                    os.makedirs(uuid_high_emg_noise_path) ### 創建屬於uuid的資料夾
+
+                                self._write_ecg_data(uuid=uuid, ecg_data_array=current_ecg_data, time_str=current_time_str, flag=0, index=i, glucose_value=glucose_value, uuid_temp_path=uuid_high_emg_noise_path)
+                        else:
+                            bad_datapath=os.path.join(os.path.dirname(uuid_temp_path).replace("RawData","bad_data"))
+                            uuid_bad_path = os.path.join(bad_datapath, uuid)
+                            if not os.path.exists(uuid_bad_path):
+                                os.makedirs(uuid_bad_path) ### 創建屬於uuid的資料夾
+
+                            self._write_ecg_data(uuid=uuid, ecg_data_array=current_ecg_data, time_str=current_time_str, flag=0, index=i, glucose_value=glucose_value, uuid_temp_path=uuid_bad_path)
+                    else:
+                        dynamic_datapath=os.path.join(os.path.dirname(uuid_temp_path).replace("RawData","dynamic_data"))
+                        uuid_dynamic_path = os.path.join(dynamic_datapath, uuid)
+                        if not os.path.exists(uuid_dynamic_path):
+                            os.makedirs(uuid_dynamic_path) ### 創建屬於uuid的資料夾
+
+                        self._write_ecg_data(uuid=uuid, ecg_data_array=current_ecg_data, time_str=current_time_str, flag=1, index=i, glucose_value=glucose_value, uuid_temp_path=uuid_dynamic_path)
+
+
+    def _split_chunks(self, data, num_chunks):
+        chunk_size = math.ceil(len(data) / num_chunks)
+        return [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
+
+
+    def feature_extraction_from_single_ecg(self,ecg_data_array,rpeak_array,glucose_value,file_name,features_uuid_path,dataset_uuid_path_high,dataset_uuid_path_low,dataset_uuid_path_normal):
+
+        '''
+        將ECG特徵放於Features資料夾，並且分配於DataSet資料夾中的normal,high,low資料夾中
+        '''
 
         errorcode="0"
         message=""
-        
-        export_rawdata_path=os.path.join(export_txtfile_path,"RawData")        
-        if not os.path.exists(export_rawdata_path): 
-            os.makedirs(export_rawdata_path) ###創建ECG擷取後存放資料夾  
 
-        uuid_temp_path = os.path.join(export_rawdata_path, uuid)
-        if not os.path.exists(uuid_temp_path): 
-            os.makedirs(uuid_temp_path) ### 創建屬於uuid的資料夾 
-        
-        glucosedata_path=os.path.join(glucosedata_path,uuid+'.csv')
-        #print('glucosedata_path:',glucosedata_path)
-        glucose_csv_file_list=glob.glob(glucosedata_path) 
-
-        ecgdata_path=os.path.join(srj_db_path, uuid, uuid +'*.srj')
-        #print('ecgdata_path:',ecgdata_path)
-        srj_file_list=glob.glob(ecgdata_path) 
-        #print('srj_file_list:',srj_file_list)
-
-        if(len(glucose_csv_file_list)==0):           
-            errorcode="-102"
-            message="An error occurs in the data-parsing function: no glucose csv files exist!"          
-            return errorcode, message
-
-        # ---- 新增：迴圈外只呼叫一次 ----
-        sorted_times, ecg_data_all, motion_data_all, breath_data_all, temp_data_all = self._load_all_srj_data(srj_db_path, srj_file_list, uuid)
-        # --------------------------------
-                
-        try:
-            with open(glucose_csv_file_list[0], newline='', encoding='utf-8') as f:
-                rows = csv.reader(f, delimiter=',')
-                for row in rows:               
-                    recored_time=row[0]
-                    glucose_value=row[1]                   
-
-                    if(glucose_value!=""):                    
-                        
-                        datetime_object = datetime.strptime(recored_time[2:],'%y/%m/%d %H:%M')
-                    
-                        if(int(glucose_value)>=250): ##血糖值高到250以上
-                            time_change = timedelta(minutes=10) ##取前後10分鐘
-                        elif(int(glucose_value)>=200):
-                            time_change = timedelta(minutes=7) ##取前後7分鐘
-                        else:                        
-                            time_change = timedelta(minutes=5) ##取前後5分鐘
-
-                        new_time_before = datetime_object - time_change 
-                        new_time_after= datetime_object + time_change 
-                        current_time_str= datetime_object.strftime("20%y%m%d %H%M%S")
-                        start_time_str = new_time_before.strftime("20%y%m%d %H%M%S")
-                        end_time_str = new_time_after.strftime("20%y%m%d %H%M%S")
-                        
-                        #ecg_data_array,motion_data_array,breath_data_array,temp_data_array = self._dataconcate(srj_db_path,srj_file_list,start_time_str,end_time_str,uuid)
-                        ecg_data_array, motion_data_array, breath_data_array, temp_data_array = self._query_by_time_range(sorted_times, ecg_data_all, motion_data_all, breath_data_all, temp_data_all, start_time_str, end_time_str)
-                        #print(ecg_data_array)
-
-                        for i in range(len(ecg_data_array)):
-                            #current_motion_data=motion_data_array[i]
-                            current_ecg_data = ecg_data_array[i]
-
-                            #print('current_time_str:',current_time_str,' glucose_value:',glucose_value,' ecg_data_len:',len(current_ecg_data))
-
-                            #if(len(current_ecg_data)==2500 and len(current_motion_data)>0): ###確定ecg資料和motion資料都有
-                            rpeak_array = rpeak_detection(current_ecg_data)
-                            result = ecg_quality_check(current_ecg_data, rpeak_array[1:])
-                            if (result == "Normal"):
-                                # static_flag,std=static_motion_analysis(motion_data=current_motion_data,sample_rate=2)
-                                # flagsum=sum(static_flag)
-                                # if(flagsum==0): ##static
-                                #     self._write_ecg_data(uuid=uuid,ecg_data_array=current_ecg_data,time_str=current_time_str,flag=0,index=i,glucose_value=glucose_value,uuid_temp_path=uuid_temp_path)
-                                # else:  ##dynamic
-                                self._write_ecg_data(uuid=uuid, ecg_data_array=current_ecg_data,
-                                                     time_str=current_time_str, flag=0, index=i,
-                                                     glucose_value=glucose_value, uuid_temp_path=uuid_temp_path)
-                                ##else:
-                            ##    errorcode=-1
-                            ##    message='error occurs in the data-parsing function: ecg data is too short!'
-
-                        '''
-                        for i in range(len(motion_data_array)):
-                            current_motion_data=motion_data_array[i]
-                            current_ecg_data=ecg_data_array[i]
-                        
-                            if(len(current_ecg_data)==2500 and len(current_motion_data)>0): ###確定ecg資料和motion資料都有                        
-                                rpeak_array=rpeak_detection(current_ecg_data)
-                                result=ecg_quality_check(current_ecg_data, rpeak_array[1:])
-                                if(result=="Normal"):                               
-                                    static_flag,std=static_motion_analysis(motion_data=current_motion_data,sample_rate=2)
-                                    flagsum=sum(static_flag)
-                                    if(flagsum==0): ##static                                                            
-                                        self._write_ecg_data(uuid=uuid,ecg_data_array=current_ecg_data,time_str=current_time_str,flag=0,index=i,glucose_value=glucose_value,uuid_temp_path=uuid_temp_path)                         
-                                    else:  ##dynamic        
-                                        self._write_ecg_data(uuid=uuid,ecg_data_array=current_ecg_data,time_str=current_time_str,flag=1,index=i,glucose_value=glucose_value,uuid_temp_path=uuid_temp_path)                            
-                            else:                           
-                                errorcode="-101" 
-                                message='An error occurs in the data-parsing function: ecg data is too short or no motion data!'                                                   
-                        '''
-            f.close()
-
-        except:
-            errorcode="-100"
-            message="An error occurs in the data-parsing function: fail to read glucose csv files"
-            return errorcode, message
-  
-        return errorcode, message
-    
-
-    def feature_extraction(self,uuid,export_txtfile_path): 
-
-        errorcode="0"
-        message=""    
-        
-        basepath=os.path.join(export_txtfile_path,"RawData",uuid)  
-        file_name_list=os.listdir(basepath)
-
-        os.chdir(basepath)
-        for index,file_name in enumerate(file_name_list):
-            ecg_data_array = []
-            with open(file_name) as file:
-                for line in file: 
-                    line = line.strip() 
-                    ecg_data_array.append(int(line)) 
-            
-            rpeak_array=rpeak_detection(ecg_data_array,measuring_mode='strap',method_type='vg',mode='original') 
-            ##rpeak_array=rpeak_detection(ecg_data_array,measuring_mode='strap',method_type='bandpass',mode='original')
-           
+        if(True):
             count=0
             mean_wave=np.zeros(150) ###特徵長度150
             if(len(rpeak_array)>0):
-                for i in range(1,len(rpeak_array)):
+                for i in range(1,len(rpeak_array)-1):  ##第一個和最後一個不列入平均
                     r_index=int(rpeak_array[i])
                     before_index=r_index-50 ##取R波前50
                     after_index=r_index+100 ##取R波後100
                     if(before_index<0 or after_index>=len(ecg_data_array)):
                         continue
-            
+
                     current_wave=np.array(ecg_data_array[before_index:after_index])
                     mean_wave=mean_wave+current_wave
                     count=count+1
 
             if count>0:
                 mean_wave=mean_wave/count  ###取得平均波形
-            else:
-                errorcode="-200"
-                message="An error occurs in the feature_extraction function: the number of R wave peak is zero!"  
+                mean_wave=mean_wave.tolist()
+                if(glucose_value>=180): ###180以上視為high
+                    file_destination_path=os.path.join(dataset_uuid_path_high,file_name)
+                elif(glucose_value<=80): ###80以下視為low
+                    file_destination_path=os.path.join(dataset_uuid_path_low,file_name)
+                elif(glucose_value>=85 and glucose_value<=170):  ###中間血糖設定為85~170之間
+                    file_destination_path=os.path.join(dataset_uuid_path_normal,file_name)
+                else: ##介於80~85，170~180之間的特徵資料先放到Feature資料夾
+                    file_destination_path=os.path.join(features_uuid_path,file_name)
 
-            mean_wave=mean_wave.astype(int)
-           
-            features_path=os.path.join(export_txtfile_path,"Features")  ##創建特徵檔案資料夾
-            if not os.path.exists(features_path): os.makedirs(features_path)
 
-            output_path=os.path.join(features_path,uuid)
-            if not os.path.exists(output_path): os.makedirs(output_path)      
+                f = open(file_destination_path, 'w')
+                for i,ecgvalue in enumerate(mean_wave):
+                    f.write(str(ecgvalue))
+                    f.write("\n")
 
-            path = os.path.join(output_path,file_name)            
-            f = open(path, 'w')
-            mean_wave=mean_wave.tolist()
-            for i,ecgvalue in enumerate(mean_wave):
-                f.write(str(ecgvalue))
-                f.write("\n")
-        
-            f.close()
+                f.close()
 
-        ##--------seperate data into high,low,normal------------
-        basepath=os.path.join(export_txtfile_path,'Features',uuid)
-        filelist=os.listdir(basepath)  ###自Features資料夾搬移到Dataset資料夾(分成高中低)
 
-        dataset_path=os.path.join(export_txtfile_path,"Dataset") ##創建Dataset資料夾
-        if not os.path.exists(dataset_path): os.makedirs(dataset_path)
-            
-        path_high=os.path.join(dataset_path,uuid,'High')
-        if not os.path.exists(path_high): os.makedirs(path_high)
-        
-        path_low=os.path.join(dataset_path,uuid,'Low')
-        if not os.path.exists(path_low): os.makedirs(path_low)
-        
-        path_normal=os.path.join(dataset_path,uuid,'Normal')
-        if not os.path.exists(path_normal): os.makedirs(path_normal)        
-        
-        other_value_index_array=[]
-        highvalue_count=0
-        lowvalue_count=0
-        normalvalue_count=0
+        return errorcode, message
+
+    def leftover_feature_to_category(self,features_uuid_path,dataset_uuid_path_low,dataset_uuid_path_high,dataset_uuid_path_normal):
+
+        errorcode="0"
+        message=""
+
+        ##--------move leftover feature into high,low,normal------------
+
+        filelist=os.listdir(features_uuid_path)  ###自Features資料夾搬移到Dataset資料夾(分成高中低)
+
+
+        highvalue_count=len(os.listdir(dataset_uuid_path_high))
+        lowvalue_count=len(os.listdir(dataset_uuid_path_low))
+        normalvalue_count=len(os.listdir(dataset_uuid_path_normal))
+
         try:
-            for i in range(len(filelist)):
-                filestr=filelist[i]
-                filestr_array=filestr.split('_')
-                valuestr=filestr_array[-1]
-                valuestr_array=valuestr.split('.')
-                value=int(valuestr_array[0])
-                oripath=os.path.join(basepath,filestr)
-
-                if(value>=180): ###180以上視為high                       
-                    newpath=os.path.join(export_txtfile_path,"Dataset",uuid,'High',filestr)               
-                    shutil.move(oripath, newpath)
-                    highvalue_count=highvalue_count+1
-                elif(value<=80): ###80以下視為low
-                    newpath=os.path.join(export_txtfile_path,"Dataset",uuid,'Low',filestr)                
-                    shutil.move(oripath, newpath) 
-                    lowvalue_count=lowvalue_count+1
-                elif(value>=85 and value<=170):  ###中間血糖設定為85~170之間
-                    newpath=os.path.join(export_txtfile_path,"Dataset",uuid,'Normal',filestr)                
-                    shutil.move(oripath, newpath)
-                    normalvalue_count=normalvalue_count+1 
-                else:
-                    other_value_index_array.append(i)     
-
-            if(len(other_value_index_array)>0): ##有介於80~85 170~180之間的數值
-                for k in range(len(other_value_index_array)):
-                    index=other_value_index_array[k]
-                    filestr=filelist[index]
+            if(len(filelist)>0): ##有介於80~85 170~180之間的數值
+                for k in range(len(filelist)):
+                    filestr=filelist[k]
                     filestr_array=filestr.split('_')
                     valuestr=filestr_array[-1]
                     valuestr_array=valuestr.split('.')
                     value=int(valuestr_array[0])
-                    oripath=os.path.join(basepath,filestr)
+                    file_source_path=os.path.join(features_uuid_path,filestr)
                     if(value>80 and value<85):
                         if(lowvalue_count<normalvalue_count and value<=82): ##低血糖筆數較少，且數值小於82，歸給低血糖，否則捨棄不用
-                            newpath=os.path.join(export_txtfile_path,"Dataset",uuid,'Low',filestr)                
-                            shutil.move(oripath, newpath)                 
+                            file_destination_path=os.path.join(dataset_uuid_path_low,filestr)
+                            shutil.move(file_source_path, file_destination_path)
                     elif(value>170 and value<180):
                         if(normalvalue_count<highvalue_count and value<=175): ##中血糖筆數較少，且數值小於175，歸給中血糖，否則捨棄不用
-                            newpath=os.path.join(export_txtfile_path,"Dataset",uuid,'Normal',filestr)                
-                            shutil.move(oripath, newpath)
+                            file_destination_path=os.path.join(dataset_uuid_path_normal,filestr)
+                            shutil.move(file_source_path, file_destination_path)
+
         except:
             errorcode="-201"
-            message="An error occurs in the feature_extraction function: fail to seperate data into high, low, normal categories!"
-            return errorcode, message
+            message="An error occurs in the leftover_feature_to_category function of Model_Builder_Predictor_Belle.py: fail to seperate data into high, low, normal categories!"
 
         return errorcode, message
-    
 
-    def data_arrangement(self,uuid,glucosedata_path,export_txtfile_path):
+
+    def data_arrangement(self,uuid,base_path,splitting_ratio=""):
 
         errorcode="0"
         message=""
-    
-        newpath=os.path.join(export_txtfile_path,"GlucoseData_"+uuid)        
-        if not os.path.exists(newpath): os.makedirs(newpath)  ###創建給AI模型訓練使用的training,testing資料夾
-        
-        path_train=os.path.join(newpath,'Train')
+
+
+        splitting_ratio_value=float((splitting_ratio.split("_"))[0])/100.0
+
+        file_destination_path=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid)
+        if not os.path.exists(file_destination_path): os.makedirs(file_destination_path)  ##創建給AI模型訓練使用的training,testing資料夾
+
+        path_train=os.path.join(file_destination_path,'Train')
         if not os.path.exists(path_train): os.makedirs(path_train)
-        
-        path_normal=os.path.join(newpath,'Train','Normal')
+
+        path_normal=os.path.join(file_destination_path,'Train','Normal')
         if not os.path.exists(path_normal): os.makedirs(path_normal)
 
-        path_high=os.path.join(newpath,'Train','High')
+        path_high=os.path.join(file_destination_path,'Train','High')
         if not os.path.exists(path_high): os.makedirs(path_high)
 
-        path_low=os.path.join(newpath,'Train','Low')
+        path_low=os.path.join(file_destination_path,'Train','Low')
         if not os.path.exists(path_low): os.makedirs(path_low)
 
 
-        path_test=os.path.join(newpath,'Test')
+        path_test=os.path.join(file_destination_path,'Test')
         if not os.path.exists(path_test): os.makedirs(path_test)
-        
-        path_normal=os.path.join(newpath,'Test','Normal')
+
+        path_normal=os.path.join(file_destination_path,'Test','Normal')
         if not os.path.exists(path_normal): os.makedirs(path_normal)
 
-        path_high=os.path.join(newpath,'Test','High')
+        path_high=os.path.join(file_destination_path,'Test','High')
         if not os.path.exists(path_high): os.makedirs(path_high)
 
-        path_low=os.path.join(newpath,'Test','Low')
+        path_low=os.path.join(file_destination_path,'Test','Low')
         if not os.path.exists(path_low): os.makedirs(path_low)
-        
-        ##try: 
-        
-        if(True):    
-            errorcode, message = self._movedata(uuid,glucosedata_path,export_txtfile_path,newpath,'Normal')
-            errorcode, message = self._movedata(uuid,glucosedata_path,export_txtfile_path,newpath,'High')
-            errorcode, message = self._movedata(uuid,glucosedata_path,export_txtfile_path,newpath,'Low')
 
-            self._data_balance(newpath,"Train") ###做data balance
-            self._data_balance(newpath,"Test") ###做data balance
-            
-        ##except:
-        ##    errorcode="-300"
-        ##    message="An error occurs in the data_arrangement function: fail to move data to normal, high and low categories!"
-        ##    return errorcode,message
+        if(True):
+            data_path=os.path.join(base_path,"Dataset",uuid,'Normal')
+            errorcode, message = self._movedata(data_path,file_destination_path,'Normal',splitting_ratio_value)
+
+            data_path=os.path.join(base_path,"Dataset",uuid,'High')
+            errorcode, message = self._movedata(data_path,file_destination_path,'High',splitting_ratio_value)
+
+            data_path=os.path.join(base_path,"Dataset",uuid,'Low')
+            errorcode, message = self._movedata(data_path,file_destination_path,'Low',splitting_ratio_value)
+
+        try:
+            self._data_balance(file_destination_path,"Train") ###做data balance
+            self._data_balance(file_destination_path,"Test") ###做data balance
+        except:
+            errorcode="-301"
+            message="An error occurs in the data_arrangement function of Model_Builder_Predictor_Belle.py: fail to run the _data_balance function!"
+            return errorcode,message
+
 
         return errorcode, message
 
-    def _data_balance(self,newpath,type):      
-        
-        """
-        newpath: Glucose_uuid directory
-        type: Train or Test
-        """
-       
-        ##print('start data balancing!')
+
+    def _data_balance(self,file_source_path,type):
+
+        '''
+        將file_source_path(GlucoseData/uuid)中normal,high,low資料夾做資料平衡(多餘的資料搬移到RemoveData資料夾)
+        type: Train 或 Test
+        '''
+
+        print('start data balancing!')
         data_num_array=[]
-        path_normal=os.path.join(newpath,type,'Normal')
+        path_normal=os.path.join(file_source_path,type,'Normal')
         normal_data_num=len(os.listdir(path_normal))
         data_num_array.append(normal_data_num)
-        
-        path_high=os.path.join(newpath,type,'High')
+
+        path_high=os.path.join(file_source_path,type,'High')
         high_data_num=len(os.listdir(path_high))
         data_num_array.append(high_data_num)
-        
-        path_low=os.path.join(newpath,type,'Low')
+
+        path_low=os.path.join(file_source_path,type,'Low')
         low_data_num=len(os.listdir(path_low))
         data_num_array.append(low_data_num)
-      
+
         data_num_sorted_array=sorted(data_num_array)
         max_data_num=data_num_sorted_array[2]
 
-        if(data_num_sorted_array[0]==0): ##最少樣本是0          
-            min_data_num=data_num_sorted_array[1]  ##取非0之最少樣本         
+        if(data_num_sorted_array[0]==0): ##最少樣本是0
+            min_data_num=data_num_sorted_array[1]  ##取非0之最少樣本
         else:
             min_data_num=data_num_sorted_array[0]
-        
+
         if(min_data_num>0):
             data_num_ratio=max_data_num/min_data_num
-        
+
             if(max_data_num>3000):  ###最大樣本超過3000筆才需要考慮資料平衡
                 if(data_num_ratio>=5): ##最多樣本數大於最小樣本數超過5倍才需要考慮資料平衡
                     mode_number=5
@@ -409,205 +437,235 @@ class DataArrangement:
                     if(max_data_num==normal_data_num): ##最多樣本的是normal
                         target_dir_name="Normal"
                     elif(max_data_num==high_data_num):##最多樣本的是high
-                        target_dir_name="High" 
+                        target_dir_name="High"
                     else:
-                        target_dir_name="Low" 
+                        target_dir_name="Low"
 
-                    balance_dir_path=os.path.join(newpath,type,target_dir_name)
-            
+                    balance_dir_path=os.path.join(file_source_path,type,target_dir_name)
+
                     filename_list=os.listdir(balance_dir_path)
                     for i in range(len(filename_list)):
                         if(i%mode_number !=0): ##移除到remove_data
                             currentpath=os.path.join(balance_dir_path,filename_list[i])
-                            copy_to_dir=os.path.join(newpath,'Remove_Data',type)  ## for exmaple: .\GlucoseData_48\\Remove_Data\\Train
-                            if not os.path.exists(copy_to_dir): 
+                            copy_to_dir=os.path.join(file_source_path,'Remove_Data',type)
+                            if not os.path.exists(copy_to_dir):
                                 os.makedirs(copy_to_dir)
 
                             copytopath=os.path.join(copy_to_dir,filename_list[i])
-                            if(not os.path.isfile(copytopath)):  
-                                if(os.path.isfile(currentpath)): 
-                                    shutil.move(currentpath,copytopath)     
-
-    def _movedata(self,uuid,glucosedata_path,export_txtfile_path,newpath,type):
-        
-        errorcode="0"
-        message=""
-              
-        bin_num=0
-        if(type=="High"): ##180~400,每差10視為一個區間
-            bin_num=23
-            lowest_value=180
-            highest_value=400
-        elif(type=="Low"):  ##30~80,每差10視為一個區間
-            bin_num=6
-            lowest_value=30
-            highest_value=80
-        else:  ##85~175,每差10視為一個區間
-            bin_num=10
-            lowest_value=85 
-            highest_value=175
-        
-        
-        data_path=os.path.join(export_txtfile_path,"Dataset",uuid,type)
-        file_list=os.listdir(data_path) ###自dataset搬移資料
-        
-        min_glucose_value=10000
-        max_glucose_value=-10000
-
-        for i in range(len(file_list)):
-            current_item=file_list[i]           
-            current_item_str_array=current_item.split('_')
-            current_last_str=current_item_str_array[-1]
-            current_last_value_str=current_last_str.split('.')[0]
-            current_glucose_value=int(current_last_value_str)
-            if(current_glucose_value>=lowest_value and current_glucose_value<=highest_value): ###先確定落在目前處理的區間中
-                if(current_glucose_value<min_glucose_value): ###找最小血糖值
-                    min_glucose_value=current_glucose_value
-            
-                if(current_glucose_value>max_glucose_value): ###找最大血糖值
-                    max_glucose_value=current_glucose_value            
+                            if(not os.path.isfile(copytopath)):
+                                if(os.path.isfile(currentpath)):
+                                    shutil.move(currentpath,copytopath)
 
 
-        for i in range(len(file_list)):
-            current_item=file_list[i]           
-            current_item_str_array=current_item.split('_')
-            current_last_str=current_item_str_array[-1]
-            current_last_value_str=current_last_str.split('.')[0] 
-            current_glucose_value=int(current_last_value_str)
-            if(current_glucose_value==min_glucose_value or current_glucose_value==max_glucose_value): ###把最大最小值放在Training data                
-                current_path=os.path.join(data_path,current_item)
-                copyto_path=os.path.join(newpath,'Train',type)  
-                if(not os.path.isfile(copyto_path)):  
-                    if (os.path.isfile(current_path)):            
-                        shutil.move(current_path,copyto_path)                
-
-            
-        ##----以上先把最低最高血糖值放到training set中---------------
-        ##----剩下的資料依照血糖數值分到不同區間，譬如高血糖180~400之間每10切成一等分，共23等分，第一等分為180~189，第二等分為190~199，依此類推        
-        glucosedata_path=os.path.join(glucosedata_path,uuid+'.csv')       
-        glucose_csv_file_list=glob.glob(glucosedata_path)      
-        value_date_histogram_pre = pd.DataFrame(columns=['time_strings'])
-        value_date_histogram = pd.DataFrame(columns=['time_strings'])       
-
-        for i in range(bin_num):
-            value_date_histogram_pre.at[i, 'time_strings']=[] ## 初始化data frame
-            value_date_histogram.at[i, 'time_strings']=[] ## 初始化data frame    
-        
-        try:
-            data_path=os.path.join(export_txtfile_path,"Dataset",uuid,type)           
-            file_list=os.listdir(data_path)            
-            time_str_pre=""
-            for index, filename in enumerate(file_list): ##統計時間質方圖
-                filename_splited_array=filename.split("_")
-                current_file_timestr=filename_splited_array[1]
-                if(current_file_timestr!=time_str_pre): ##上一筆時間字串與目前分析的這筆是不同時間字串
-                    time_str_pre=current_file_timestr
-                    current_last_str=filename_splited_array[-1]
-                    current_last_value_str=current_last_str.split('.')[0]
-                    current_glucose_value=int(current_last_value_str)
-                    if(current_glucose_value>=lowest_value and current_glucose_value<=highest_value): ##數值落在目前處理的區間才處理                        
-                        current_bin_index=math.floor((current_glucose_value-lowest_value)/10) ###此血糖值落在哪一個bin中          
-                        value_date_histogram.at[current_bin_index, 'time_strings'].append(current_file_timestr)  ##將時間字串放入此區間(可能重複)
-                   
-            
-            ##for i in range(bin_num):  
-            ##    print('bin_',str(i),': ', value_date_histogram.at[i, 'time_strings'])            
-
-                
-            for index, filename in enumerate(file_list): ###比對時間字串是否位於前80%
-                filename_splited_array=filename.split("_")
-                current_file_timestr=filename_splited_array[1]
-                current_last_str=filename_splited_array[-1]
-                current_last_value_str=current_last_str.split('.')[0]
-                current_glucose_value=int(current_last_value_str)
-                if(current_glucose_value>=lowest_value and current_glucose_value<=highest_value): ##數值落在目前處理的區間才處理      
-                    current_bin_index=math.floor((current_glucose_value-lowest_value)/10)                   
-                    current_timestr_array=value_date_histogram.at[current_bin_index,'time_strings']
-                    current_trainingset_timestr_array=[] 
-                    if(len(current_timestr_array)>=2): ###血糖區間範圍內有超過筆2時間才需要切train and test set
-                        trainingset_num=math.floor(len(current_timestr_array)*0.8)                      
-                        current_trainingset_timestr_array=current_timestr_array[0:trainingset_num]
-
-                    else: ###不超過2筆時間，就直接給training set
-                        current_trainingset_timestr_array=current_timestr_array  
-                
-                    if(current_file_timestr not in current_trainingset_timestr_array): ## 不在trainingset的time string陣列中，就分到testing set                                          
-                        current_path=os.path.join(data_path,filename)
-                        copyto_path=os.path.join(newpath,'Test',type)                       
-                        if(not os.path.isfile(copyto_path)):
-                            if (os.path.isfile(current_path)):
-                                shutil.move(current_path,copyto_path)   
-
-                    else:    ## 在trainingset的time string陣列中，分到training set                       
-                        current_path=os.path.join(data_path,filename)
-                        copyto_path=os.path.join(newpath,'Train',type)
-                        if(not os.path.isfile(copyto_path)):
-                            if (os.path.isfile(current_path)):
-                                shutil.move(current_path,copyto_path)           
-            
-        
-        except:
-            errorcode="-101"
-            message="An error occurs in the _movedata function: fail to read glucose csv files"
-        
-        return errorcode, message   
-
-       
-    def _dataconcate(self,srj_db_path,srj_file_list,start_time,end_time,uuid): ####資料串接
-
+    def _movedata(self, data_path, newpath, type, splitting_ratio_value):
         """
-        input ---
-        db_path: srj檔案所在路徑
-        srj_file_list: srj檔案列表
-        start_time: 設定串接資料的開始日期(可能包含時分秒，有時分秒之格式格式 20240304 234651)  
-        end_time: 設定串接資料的結束日期(可能包含時分秒，有時分秒之格式格式 20240304 234651)  
-            
-        output ---
-        original_timearray: 所有srj檔中每個tt片段的開始時間序列
-        ecg_data_array: 所有srj檔中每個tt片段ECG資料串接後的序列
-        motion_data_array:  所有srj檔中每個tt片段motion資料串接後的序列
-        breath_data_array:  所有srj檔中每個tt片段breath資料串接後的序列
-        temp_data_array: 所有srj檔中每個tt片段temp資料串接後的序列
+        資料放置位置依日期切割成training 和 testing
+
+        input:
+            data_path: 資料來源路徑
+            newpath: 目標路徑
+            type: 資料類型 (High/Low/Normal)
+            splitting_ratio_value: 切割比例 (訓練集比例)
         """
-   
-        original_timearray=[]
-        ecg_data_array=[]
-        motion_data_array=[]
-        breath_data_array=[]
-        temp_data_array=[]
-   
 
-        if(len(start_time)>8): ####有時分秒之格式       
-            start_time = datetime.strptime(start_time,"%Y%m%d %H%M%S")
-            end_time = datetime.strptime(end_time,"%Y%m%d %H%M%S")
-        else:   ###只有年月日之格式     
-            start_time = datetime.strptime(start_time,"%Y%m%d")
-            end_time=datetime.strptime(end_time,"%Y%m%d") 
-      
-        for index in range(len(srj_file_list)):
-            ##current_file_path=os.path.join(db_path,uuid,srj_file_list[index])   
-            current_file_path=os.path.join(srj_db_path,srj_file_list[index])   
-            with open(current_file_path,"r") as srj:
-                line = srj.readline()
-                while line:                    
-                    data = json.loads(line)
-                    motions = data["rows"]["motions"]
-                    ecgs=data["rows"]["ecgs"]
-                    breaths=data["rows"]["breaths"]
-                    temps=data["rows"]["temps"]
-                    tt=data["tt"]
-                    tt=int(tt/1000)
-                    nowtime=datetime.fromtimestamp(tt)
-                    
-                    if(nowtime>=start_time and nowtime<=end_time): ###針對當天的時段Concate Data                                                              
-                        motion_data_array.append(motions)                    
-                        ecg_data_array.append(ecgs) 
-                        breath_data_array.append(breaths)                         
-                        temp_data_array.append(temps)         
-                
-                    line = srj.readline()          
+        errorcode = "0"
+        message = ""
 
-        return ecg_data_array,motion_data_array,breath_data_array,temp_data_array        
+        # 根據類型設定血糖值範圍
+        if type == "High":
+            lowest_value = 180      # 高血糖最低值
+            highest_value = 500     # 高血糖最高值
+        elif type == "Low":
+            lowest_value = 30       # 低血糖最低值
+            highest_value = 80      # 低血糖最高值
+        else:  # Normal
+            lowest_value = 85       # 正常血糖最低值
+            highest_value = 175     # 正常血糖最高值
+
+        # 取得並排序所有檔案列表
+        rawdata_file_list = sorted(os.listdir(data_path))
+
+        # ====== 步驟1: 收集所有檔案的日期資訊 ======
+        dates_all = []
+
+        for filename in rawdata_file_list:
+            # 從檔名中解析日期 (格式: xxx_YYYYMMDD_xxx)
+            parts = filename.split("_")
+            date_str = parts[1][0:8]  # 取得前8個字元作為日期
+            file_date = datetime.strptime(date_str, "%Y%m%d")
+            dates_all.append(file_date)
+
+        ## 檢查是否有收集到日期資料
+        if not dates_all:
+            message="An error occurs in the _movedata function of Model_Builder_Predictor_Belle.py: no data is collected!"
+            return errorcode, message
+
+        ## 取得所有不重複的日期並排序
+        dates_unique = sorted(set(dates_all))
+        total_special_days = len(dates_unique)
+
+        ## 至少需要2個不同日期才能進行切割
+        if total_special_days < 2:
+            message = "An error occurs in the _movedata function of Model_Builder_Predictor_Belle.py: Insufficient data for splitting (need data from at least 2 different dates)."
+            return errorcode, message
+
+
+        ## ====== 步驟2: 計算切割時間點 ======
+        ## 根據切割比例計算訓練集所包含的天數
+        days_in_r_percent = int(total_special_days * splitting_ratio_value)
+        if days_in_r_percent < 1:
+            days_in_r_percent = 1  # 至少要有1天的訓練資料
+
+
+        ## 設定切割日期 (此日期以之前的為訓練集，之後的為測試集)
+        split_datetime = dates_unique[days_in_r_percent - 1]
+
+        # ====== 步驟3: 找出血糖值的最大值和最小值 ======
+        file_list = os.listdir(data_path)
+
+        min_glucose_value = 10000   # 初始化最小值 (用大數值)
+        max_glucose_value = -10000  # 初始化最大值 (用小數值)
+
+        # 掃描所有檔案，找出在指定範圍內的最大和最小血糖值
+        for i in range(len(file_list)):
+            current_item = file_list[i]
+            try:
+                # 從檔名中解析血糖值 (檔名最後一段數字)
+                current_item_str_array = current_item.split('_')
+                current_last_str = current_item_str_array[-1]
+                current_last_value_str = current_last_str.split('.')[0]  # 移除副檔名
+                current_glucose_value = int(current_last_value_str)
+
+                # 只統計在指定範圍內的血糖值
+                if current_glucose_value >= lowest_value and current_glucose_value <= highest_value:
+                    if current_glucose_value < min_glucose_value:
+                        min_glucose_value = current_glucose_value
+                    if current_glucose_value > max_glucose_value:
+                        max_glucose_value = current_glucose_value
+            except Exception as e:
+                # 檔名格式錯誤，跳過
+                pass
+
+        # ====== 步驟4: 收集所有最小值和最大值的檔案 ======
+        min_files = []  # 儲存最小血糖值的檔案
+        max_files = []  # 儲存最大血糖值的檔案
+
+        # 確認有找到有效的最大最小值
+        if min_glucose_value != 10000 and max_glucose_value != -10000:
+            for i in range(len(file_list)):
+                current_item = file_list[i]
+                try:
+                    # 再次解析血糖值
+                    current_item_str_array = current_item.split('_')
+                    current_last_str = current_item_str_array[-1]
+                    current_last_value_str = current_last_str.split('.')[0]
+                    current_glucose_value = int(current_last_value_str)
+
+                    # 將最小值和最大值的檔案分別收集起來
+                    if current_glucose_value == min_glucose_value:
+                        min_files.append(current_item)
+                    elif current_glucose_value == max_glucose_value:
+                        max_files.append(current_item)
+
+                except Exception as e:
+                    pass
+
+        # ====== 步驟5: 按比例分割最小值檔案 ======
+        if len(min_files) > 0:
+
+            # 計算分割索引位置
+            split_index_min = int(len(min_files) * splitting_ratio_value)
+            if split_index_min == 0 and len(min_files) > 0:
+                split_index_min = 1  # 至少要有1個檔案在訓練集
+
+            # 分配檔案到訓練集或測試集
+            for idx, filename in enumerate(min_files):
+                try:
+                    current_path = os.path.join(data_path, filename)
+
+                    if idx < split_index_min:
+                        # 前面的檔案分配到訓練集
+                        copyto_path = os.path.join(newpath, 'Train', type)
+                        os.makedirs(copyto_path, exist_ok=True)
+
+                        if os.path.isfile(current_path):
+                            shutil.move(current_path, copyto_path)
+                    else:
+                        # 後面的檔案分配到測試集
+                        copyto_path = os.path.join(newpath, 'Test', type)
+                        os.makedirs(copyto_path, exist_ok=True)
+
+                        if os.path.isfile(current_path):
+                            shutil.move(current_path, copyto_path)
+
+                except Exception as e:
+                    pass
+
+        # ====== 步驟6: 按比例分割最大值檔案 ======
+        if len(max_files) > 0:
+
+            # 計算分割索引位置
+            split_index_max = int(len(max_files) * splitting_ratio_value)
+            if split_index_max == 0 and len(max_files) > 0:
+                split_index_max = 1  # 至少要有1個檔案在訓練集
+
+            # 分配檔案到訓練集或測試集
+            for idx, filename in enumerate(max_files):
+                try:
+                    current_path = os.path.join(data_path, filename)
+
+                    if idx < split_index_max:
+                        # 前面的檔案分配到訓練集
+                        copyto_path = os.path.join(newpath, 'Train', type)
+                        os.makedirs(copyto_path, exist_ok=True)
+
+                        if os.path.isfile(current_path):
+                            shutil.move(current_path, copyto_path)
+                    else:
+                        # 後面的檔案分配到測試集
+                        copyto_path = os.path.join(newpath, 'Test', type)
+                        os.makedirs(copyto_path, exist_ok=True)
+
+                        if os.path.isfile(current_path):
+                            shutil.move(current_path, copyto_path)
+
+                except Exception as e:
+                    pass
+
+        # ====== 步驟7: 根據日期分配剩餘的檔案 ======
+
+        # 處理每個剩餘的檔案
+        file_list = os.listdir(data_path)  ##重新讀取資料夾中剩餘的檔案
+        for filename in file_list:
+            try:
+                # 從檔名中解析日期時間
+                filename_splited_array = filename.split("_")
+                current_file_timestr = filename_splited_array[1]
+                current_datetime = datetime.strptime(current_file_timestr[0:-6], "%Y%m%d")
+
+                current_path = os.path.join(data_path, filename)
+
+                # 根據日期決定分配到訓練集或測試集
+                if current_datetime > split_datetime:
+                    # 日期晚於分割點 -> 測試集
+                    copyto_path = os.path.join(newpath, 'Test', type)
+                    os.makedirs(copyto_path, exist_ok=True)
+
+                    if os.path.isfile(current_path):
+                        shutil.move(current_path, copyto_path)
+                else:
+                    # 日期等於或早於分割點 -> 訓練集
+                    copyto_path = os.path.join(newpath, 'Train', type)
+                    os.makedirs(copyto_path, exist_ok=True)
+
+                    if os.path.isfile(current_path):
+                        shutil.move(current_path, copyto_path)
+
+            except Exception as e:
+                # 處理失敗的檔案跳過
+                pass
+
+        return errorcode, message
 
 
     def _load_all_srj_data(self, srj_db_path, srj_file_list, uuid):
@@ -1172,8 +1230,8 @@ def _majority_filtering(glucose_list):
         return majority_result
 
 
-def Clean_Data(uuid,basepath):    
-    
+def Clean_Data(uuid,basepath,splitting_ratio=""):
+
     errorcode="0"
     message=""
 
@@ -1181,106 +1239,109 @@ def Clean_Data(uuid,basepath):
         raw_data_path=os.path.join(basepath,"RawData",uuid)
         if os.path.isdir(raw_data_path):
             shutil.rmtree(raw_data_path)
-      
+
         dataset_data_path=os.path.join(basepath,"Dataset",uuid)
         if os.path.isdir(dataset_data_path):
-            shutil.rmtree(dataset_data_path)        
+            shutil.rmtree(dataset_data_path)
 
         features_data_path=os.path.join(basepath,"Features",uuid)
         if os.path.isdir(features_data_path):
-            shutil.rmtree(features_data_path)       
-    
-      
-        glucose_data_path=os.path.join(basepath,"GlucoseData_"+uuid)
-        if os.path.isdir(glucose_data_path):
-            shutil.rmtree(glucose_data_path)        
-    
-        model_data_path=os.path.join(basepath,"Temp_ThreeClasses_Model",uuid)
-        if os.path.isdir(model_data_path):
-            shutil.rmtree(model_data_path)          
+            shutil.rmtree(features_data_path)
 
-        model_data_path=os.path.join(basepath,"Temp_TwoClasses_Model",uuid)
+        high_emg_data_path=os.path.join(basepath,"high_emg_data",uuid)
+        if os.path.isdir(high_emg_data_path):
+            shutil.rmtree(high_emg_data_path)
+
+
+        glucose_data_path=os.path.join(basepath,splitting_ratio,"GlucoseData",uuid)
+        if os.path.isdir(glucose_data_path):
+            shutil.rmtree(glucose_data_path)
+
+        model_data_path=os.path.join(basepath,splitting_ratio,"Temp_ThreeClasses_Model",uuid)
         if os.path.isdir(model_data_path):
             shutil.rmtree(model_data_path)
-    
+
+        model_data_path=os.path.join(basepath,splitting_ratio,"Temp_TwoClasses_Model",uuid)
+        if os.path.isdir(model_data_path):
+            shutil.rmtree(model_data_path)
+
         errorcode="0"
-        message="All data for uuid "+uuid+" has been deleted!"     
+        message="All data for uuid "+uuid+" has been deleted!"
     except:
         errorcode="-800"
-        message="An error occurs in the Clean_Data function: Some data for uuid "+uuid+" has not deleted clearly!"   
+        message="An error occurs in the Clean_Data function: Some data for uuid "+uuid+" has not deleted clearly!"
 
-    return errorcode,message   
+    return errorcode,message
 
 
-def Clean_Model(uuid,basepath):    
-    
+def Clean_Model(uuid,basepath,splitting_ratio=""):
+
     empty_state=0
     errorcode="0"
-    message=""  
-    
-    try:       
-        model_path=os.path.join(basepath,"Best_ThreeClasses_Model",uuid)
+    message=""
+
+    try:
+        model_path=os.path.join(basepath,splitting_ratio,"Best_ThreeClasses_Model",uuid)
         if os.path.exists(model_path):
             shutil.rmtree(model_path)
             errorcode="0"
             message="Model for uuid "+uuid+" has been deleted!"
         else:
-            empty_state=1           
+            empty_state=1
 
-        model_path=os.path.join(basepath,"Best_TwoClasses_Model",uuid)
+        model_path=os.path.join(basepath,splitting_ratio,"Best_TwoClasses_Model",uuid)
         if os.path.exists(model_path):
             shutil.rmtree(model_path)
             errorcode="0"
-            message="Model for uuid "+uuid+" has been deleted!" 
+            message="Model for uuid "+uuid+" has been deleted!"
         else:
             if(empty_state==1):
                 errorcode="-801"
-                message="An error occurs in the Clean_Model function: No built model for uuid "+uuid+" exists, it can not be cleaned!"            
-              
+                message="An error occurs in the Clean_Model function: No built model for uuid "+uuid+" exists, it can not be cleaned!"
+
     except:
         errorcode="-802"
-        message="An error occurs in the Clean_Model function: Model for uuid:"+uuid+" has not deleted clearly!"   
+        message="An error occurs in the Clean_Model function: Model for uuid:"+uuid+" has not deleted clearly!"
 
-    return errorcode,message    
+    return errorcode,message
 
 
 ##def BuildModel(uuid,basepath,srj_db_path,glucosedata_path,server_db_path=""): ##測試用
-def BuildModel(uuid,basepath,srj_db_path,glucosedata_path):
+def BuildModel(uuid,basepath,srj_db_path,glucosedata_path,server_db_path="",processnum=8,splitting_ratio="70_30"):
 
     errorcode="0"
-    message="" 
+    message=""
     status=-1
-    
-    
-    DataArrangement_Obj = DataArrangement() 
-    ##errorcode, message = DataArrangement_Obj.data_processing(uuid,start_time,end_time,srj_db_path,glucosedata_path,basepath,server_db_path) ##測試用
-    errorcode, message = DataArrangement_Obj.data_processing(uuid, srj_db_path, glucosedata_path, basepath)
-    
+
+
+    DataArrangement_Obj = DataArrangement()
+    errorcode, message = DataArrangement_Obj.data_processing(uuid, srj_db_path, glucosedata_path, basepath, server_db_path, processnum, splitting_ratio)
+
 
     if(int(errorcode)<0):
         return status, errorcode, message
 
-    checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Train","Low")
+    checkedpath=os.path.join(basepath,splitting_ratio,"GlucoseData",uuid,"Train","Low")
     filelist_low_train=os.listdir(checkedpath)
 
-    checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Test","Low")
+    checkedpath=os.path.join(basepath,splitting_ratio,"GlucoseData",uuid,"Test","Low")
     filelist_low_test=os.listdir(checkedpath)
 
-    checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Train","High")
+    checkedpath=os.path.join(basepath,splitting_ratio,"GlucoseData",uuid,"Train","High")
     filelist_high_train=os.listdir(checkedpath)
 
-    checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Test","High")
+    checkedpath=os.path.join(basepath,splitting_ratio,"GlucoseData",uuid,"Test","High")
     filelist_high_test=os.listdir(checkedpath)
 
-    checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Train","Normal")
+    checkedpath=os.path.join(basepath,splitting_ratio,"GlucoseData",uuid,"Train","Normal")
     filelist_normal_train=os.listdir(checkedpath)
 
-    checkedpath=os.path.join(basepath,"GlucoseData_"+uuid,"Test","Normal")
+    checkedpath=os.path.join(basepath,splitting_ratio,"GlucoseData",uuid,"Test","Normal")
     filelist_normal_test=os.listdir(checkedpath)
 
 
     if(len(filelist_low_train)>0 and len(filelist_low_test)>0 and len(filelist_high_train)>0 and len(filelist_high_test)>0 and len(filelist_normal_train)>0 and len(filelist_normal_test)>0):  ###有中，低和高血糖資料
-        status, errorcode, message=BuildModel_ThreeClasses(uuid,basepath)
+        status, errorcode, message=BuildModel_ThreeClasses(uuid,basepath,splitting_ratio)
         if(int(errorcode)>=0):
             message="Model with three classes has been built!"
     elif(len(filelist_high_train)==0 or len(filelist_high_test)==0 or len(filelist_normal_train)==0 or len(filelist_normal_test)==0):
@@ -1288,15 +1349,15 @@ def BuildModel(uuid,basepath,srj_db_path,glucosedata_path):
         message="An error occurs in the BuildModel function: No enough normal or high glucose data!"
         status=-1
     else:
-      status, errorcode, message=BuildModel_TwoClasses(uuid,basepath)
+      status, errorcode, message=BuildModel_TwoClasses(uuid,basepath,splitting_ratio)
       if(int(errorcode)>=0):
         message="Model with two classes has been built!"
 
     return status, errorcode, message
  
 
-def BuildModel_ThreeClasses(uuid,basepath):
-   
+def BuildModel_ThreeClasses(uuid,basepath,splitting_ratio=""):
+
     errorcode="0"
     message=""
     status=-1
@@ -1306,15 +1367,15 @@ def BuildModel_ThreeClasses(uuid,basepath):
 
     print('Start building the model with three classes!')
     ## the model have been built or not and read performance file
-    model_output_folder = os.path.join(basepath, "Best_ThreeClasses_Model", uuid)
-    if not os.path.exists(model_output_folder): 
+    model_output_folder = os.path.join(basepath, splitting_ratio, "Best_ThreeClasses_Model", uuid)
+    if not os.path.exists(model_output_folder):
         os.makedirs(model_output_folder)
-    
-    model_data_path=os.path.join(basepath,"Temp_ThreeClasses_Model",uuid)  ###先清空過去訓練的模型佔存資料
-    if os.path.isdir(model_data_path):
-        shutil.rmtree(model_data_path)    
 
-    model_current_best_performance_txtfile=os.path.join(basepath, "Best_ThreeClasses_Model", uuid,"Performance_"+code_version+"_"+current_time_str+".txt")   
+    model_data_path=os.path.join(basepath,splitting_ratio,"Temp_ThreeClasses_Model",uuid)  ###先清空過去訓練的模型佔存資料
+    if os.path.isdir(model_data_path):
+        shutil.rmtree(model_data_path)
+
+    model_current_best_performance_txtfile=os.path.join(basepath, splitting_ratio, "Best_ThreeClasses_Model", uuid,"Performance_"+code_version+"_"+current_time_str+".txt")
     if not os.path.exists(model_current_best_performance_txtfile): ###沒有檔案，先創造檔案
         with open(model_current_best_performance_txtfile, "w") as file:
             file.write("Sensitivity:0")
@@ -1325,13 +1386,13 @@ def BuildModel_ThreeClasses(uuid,basepath):
             file.write("\n")
             file.write("Acc:0")
             file.write("\n")
-            file.write("TP:%d, FP:%d, FN:%d, TN:%d\n" %(0, 0, 0, 0)) 
-    
-   
-    ### Create dataset object  
-    Method = 'combine' 
+            file.write("TP:%d, FP:%d, FN:%d, TN:%d\n" %(0, 0, 0, 0))
 
-    current_path=os.path.join(basepath,'GlucoseData_'+uuid,'Train')
+
+    ### Create dataset object
+    Method = 'combine'
+
+    current_path=os.path.join(basepath,splitting_ratio,"GlucoseData",uuid,'Train')
 
     filelist_low=os.listdir(os.path.join(current_path,'Low'))  
     filelist_high=os.listdir(os.path.join(current_path,'High'))
@@ -1368,7 +1429,7 @@ def BuildModel_ThreeClasses(uuid,basepath):
 
     train_loader = DataLoader(train_dataset, batch_size=Batch_size, shuffle=True)
     valid_loader = DataLoader(valid_dataset, batch_size=Batch_size)
-    current_test_path=os.path.join(basepath,'GlucoseData_'+uuid,'Test')
+    current_test_path=os.path.join(basepath,splitting_ratio,"GlucoseData",uuid,'Test')
 
     filelist_low=os.listdir(os.path.join(current_test_path,'Low'))
     filelist_high=os.listdir(os.path.join(current_test_path,'High'))
@@ -1399,7 +1460,7 @@ def BuildModel_ThreeClasses(uuid,basepath):
     current_best_FN=0
     current_best_TN=0
     
-    save_path = os.path.join(basepath,"Temp_ThreeClasses_Model",uuid) ###建立uuid專屬的模型存放資料夾  
+    save_path = os.path.join(basepath,splitting_ratio,"Temp_ThreeClasses_Model",uuid) ###建立uuid專屬的模型存放資料夾  
     if os.path.isdir(save_path) is True:
         shutil.rmtree(save_path)
     os.makedirs(save_path)
@@ -1540,7 +1601,7 @@ def BuildModel_ThreeClasses(uuid,basepath):
         num_epoch = epoch_number      
         model = CNN(data_len=dataset.data_len, input_channel=dataset.channel)
         model.to(device)        
-        model_path = os.path.join(basepath,"Temp_ThreeClasses_Model",uuid,"Model_"+str(uuid)+"_"+str(num_epoch)+".pth")
+        model_path = os.path.join(basepath,splitting_ratio,"Temp_ThreeClasses_Model",uuid,"Model_"+str(uuid)+"_"+str(num_epoch)+".pth")
         model.load_state_dict(torch.load(model_path))
 
         test_old_data = 0
@@ -1628,7 +1689,7 @@ def BuildModel_ThreeClasses(uuid,basepath):
             current_best_TN=TN
 
             torch.save(model.state_dict(),os.path.join(model_output_folder,"BestModel_"+code_version+"_"+current_time_str+".pth"))  ###比目前訓練階段的模型績效好，儲存起來            
-            model_current_best_performance_txtfile=os.path.join(basepath, "Best_ThreeClasses_Model", uuid,"Performance_"+code_version+"_"+current_time_str+".txt")            
+            model_current_best_performance_txtfile=os.path.join(basepath, splitting_ratio, "Best_ThreeClasses_Model", uuid,"Performance_"+code_version+"_"+current_time_str+".txt")            
             with open(model_current_best_performance_txtfile, "w") as file:
                 file.write("Sensitivity:%.2f" %(sensitivity))
                 file.write("\n")
@@ -1641,7 +1702,7 @@ def BuildModel_ThreeClasses(uuid,basepath):
                 file.write("TP:%d, FP:%d, FN:%d, TN:%d\n" %(TP, FP, FN, TN))           
 
 
-    model_historic_best_performance_txtfile=os.path.join(basepath, "Best_ThreeClasses_Model", uuid,"Historic_Best_Performance.txt") ###歷史績效檔案
+    model_historic_best_performance_txtfile=os.path.join(basepath, splitting_ratio, "Best_ThreeClasses_Model", uuid,"Historic_Best_Performance.txt") ###歷史績效檔案
     if not os.path.exists(model_historic_best_performance_txtfile): ###如果沒有過去歷史檔案，先創造檔案
         with open(model_historic_best_performance_txtfile, "w") as file:
             file.write("Sensitivity:0")
@@ -1688,7 +1749,7 @@ def BuildModel_ThreeClasses(uuid,basepath):
         historic_breakthrough_flag = True
 
     if (historic_breakthrough_flag):
-        model_historic_best_performance_txtfile=os.path.join(basepath, "Best_ThreeClasses_Model", uuid,"Historic_Best_Performance.txt")
+        model_historic_best_performance_txtfile=os.path.join(basepath, splitting_ratio, "Best_ThreeClasses_Model", uuid,"Historic_Best_Performance.txt")
         with open(model_historic_best_performance_txtfile, "w") as file:
             file.write("Sensitivity:%.2f" %(current_best_sensitivity))
             file.write("\n")
@@ -1712,7 +1773,7 @@ def BuildModel_ThreeClasses(uuid,basepath):
 
     return status, errorcode, message       
   
-def BuildModel_TwoClasses(uuid,basepath):
+def BuildModel_TwoClasses(uuid,basepath,splitting_ratio=""):
     
     errorcode="0"
     message=""
@@ -1723,15 +1784,15 @@ def BuildModel_TwoClasses(uuid,basepath):
 
     print('Start building the model with two classes!')
        
-    model_output_folder = os.path.join(basepath, "Best_TwoClasses_Model", uuid)
+    model_output_folder = os.path.join(basepath, splitting_ratio, "Best_TwoClasses_Model", uuid)
     if not os.path.exists(model_output_folder): 
         os.makedirs(model_output_folder)
     
-    model_data_path=os.path.join(basepath,"Temp_TwoClasses_Model",uuid)  ###先清空過去訓練的模型佔存資料
+    model_data_path=os.path.join(basepath,splitting_ratio,"Temp_TwoClasses_Model",uuid)  ###先清空過去訓練的模型佔存資料
     if os.path.isdir(model_data_path):
         shutil.rmtree(model_data_path)    
 
-    model_current_best_performance_txtfile=os.path.join(basepath, "Best_TwoClasses_Model", uuid,"Performance_"+code_version+"_"+current_time_str+".txt")   
+    model_current_best_performance_txtfile=os.path.join(basepath, splitting_ratio, "Best_TwoClasses_Model", uuid,"Performance_"+code_version+"_"+current_time_str+".txt")   
     if not os.path.exists(model_current_best_performance_txtfile): ###沒有檔案，先創造檔案
         with open(model_current_best_performance_txtfile, "w") as file:
             file.write("Sensitivity:0")
@@ -1746,7 +1807,7 @@ def BuildModel_TwoClasses(uuid,basepath):
 
     ### Create dataset object  
     Method = 'combine'
-    current_path=os.path.join(basepath,'GlucoseData_'+uuid,'Train')
+    current_path=os.path.join(basepath,splitting_ratio,"GlucoseData",uuid,"Train")
     filelist_high=os.listdir(os.path.join(current_path,'High'))
     filelist_normal=os.listdir(os.path.join(current_path,'Normal'))    
 
@@ -1781,7 +1842,7 @@ def BuildModel_TwoClasses(uuid,basepath):
 
     train_loader = DataLoader(train_dataset, batch_size=Batch_size, shuffle=True)
     valid_loader = DataLoader(valid_dataset, batch_size=Batch_size)
-    current_test_path=os.path.join(basepath,'GlucoseData_'+uuid,'Test')
+    current_test_path=os.path.join(basepath,splitting_ratio,"GlucoseData",uuid,"Test")
 
 
     filelist_high=os.listdir(os.path.join(current_test_path,'High'))
@@ -1813,7 +1874,7 @@ def BuildModel_TwoClasses(uuid,basepath):
     current_best_FN=0
     current_best_TN=0
          
-    save_path = os.path.join(basepath,"Temp_TwoClasses_Model",uuid) ###建立uuid專屬的模型存放資料夾
+    save_path = os.path.join(basepath,splitting_ratio,"Temp_TwoClasses_Model",uuid) ###建立uuid專屬的模型存放資料夾
     if os.path.isdir(save_path) is True:
         shutil.rmtree(save_path)
     os.makedirs(save_path)
@@ -1946,12 +2007,12 @@ def BuildModel_TwoClasses(uuid,basepath):
         num_epoch = epoch_number
         model = TwoClasses_CNN(data_len=dataset.data_len, input_channel=dataset.channel)
         model.to(device)        
-        model_path = os.path.join(basepath,"Temp_TwoClasses_Model",uuid,"TwoClassesModel_"+str(uuid)+"_"+str(num_epoch)+".pth")
+        model_path = os.path.join(basepath,splitting_ratio,"Temp_TwoClasses_Model",uuid,"TwoClassesModel_"+str(uuid)+"_"+str(num_epoch)+".pth")
         model.load_state_dict(torch.load(model_path))
 
         test_old_data = 0
         if test_old_data:
-            testdata = ecgDataset(dir_path = './GlucoseData_'+uuid+'/Test', method=Method, classes=2)
+            testdata = ecgDataset(dir_path = os.path.join(basepath,splitting_ratio,"GlucoseData",uuid,"Test"), method=Method, classes=2)
             test_loader = DataLoader(testdata, batch_size=Batch_size)
     
         ##model = model.to('cpu')
@@ -2034,7 +2095,7 @@ def BuildModel_TwoClasses(uuid,basepath):
             current_best_FN=FN
             current_best_TN=TN
             torch.save(model.state_dict(),os.path.join(model_output_folder,"BestModel_"+code_version+"_"+current_time_str+".pth"))  ###比目前訓練階段的模型績效好，儲存起來            
-            model_current_best_performance_txtfile=os.path.join(basepath, "Best_TwoClasses_Model", uuid,"Performance_"+code_version+"_"+current_time_str+".txt")            
+            model_current_best_performance_txtfile=os.path.join(basepath, splitting_ratio, "Best_TwoClasses_Model", uuid,"Performance_"+code_version+"_"+current_time_str+".txt")            
             with open(model_current_best_performance_txtfile, "w") as file:
                 file.write("Sensitivity:%.2f" %(sensitivity))
                 file.write("\n")
@@ -2047,7 +2108,7 @@ def BuildModel_TwoClasses(uuid,basepath):
                 file.write("TP:%d, FP:%d, FN:%d, TN:%d\n" %(TP, FP, FN, TN))            
 
 
-    model_historic_best_performance_txtfile=os.path.join(basepath, "Best_TwoClasses_Model", uuid,"Historic_Best_Performance.txt") ###歷史最佳績效
+    model_historic_best_performance_txtfile=os.path.join(basepath, splitting_ratio, "Best_TwoClasses_Model", uuid,"Historic_Best_Performance.txt") ###歷史最佳績效
     if not os.path.exists(model_historic_best_performance_txtfile): ###如果沒有過去歷史檔案，先創造檔案
         with open(model_historic_best_performance_txtfile, "w") as file:
             file.write("Sensitivity:0")
@@ -2092,7 +2153,7 @@ def BuildModel_TwoClasses(uuid,basepath):
         historic_breakthrough_flag = True
 
     if(historic_breakthrough_flag):
-        model_historic_best_performance_txtfile=os.path.join(basepath,"Best_TwoClasses_Model", uuid,"Historic_Best_Performance.txt")
+        model_historic_best_performance_txtfile=os.path.join(basepath,splitting_ratio,"Best_TwoClasses_Model", uuid,"Historic_Best_Performance.txt")
 
         with open(model_historic_best_performance_txtfile, "w") as file:
             file.write("Sensitivity:%.2f" %(current_best_sensitivity))
@@ -2119,28 +2180,29 @@ def BuildModel_TwoClasses(uuid,basepath):
 
 class GlucoseThreeClassesPredictor: ###血糖預測類別
 
-    def __init__(self,basepath):
-        self.basepath = basepath   
+    def __init__(self,basepath,splitting_ratio=""):
+        self.basepath = basepath
+        self.splitting_ratio = splitting_ratio
 
-    def glucose_predict(self,uuid,ecgdata): 
-        
+    def glucose_predict(self,uuid,ecgdata):
+
         errorcode="0"
         message=""
 
-        current_testingdata_path=os.path.join(self.basepath,'GlucoseData_'+uuid,'Current_Test_Data')
+        current_testingdata_path=os.path.join(self.basepath,self.splitting_ratio,"GlucoseData",uuid,'Current_Test_Data')
         if not os.path.exists(current_testingdata_path): os.makedirs(current_testingdata_path)
 
-        normal_testingdata_path=os.path.join(self.basepath,'GlucoseData_'+uuid,'Current_Test_Data','Normal') ###ECG資料都只放在Normal資料夾
+        normal_testingdata_path=os.path.join(self.basepath,self.splitting_ratio,"GlucoseData",uuid,'Current_Test_Data','Normal') ###ECG資料都只放在Normal資料夾
         if not os.path.exists(normal_testingdata_path): os.makedirs(normal_testingdata_path)
-        
-        old_file_list=os.listdir(normal_testingdata_path)        
+
+        old_file_list=os.listdir(normal_testingdata_path)
         for i,filename in enumerate(old_file_list): ###刪除上次預測的資料
             os.remove(os.path.join(normal_testingdata_path,filename))
 
-        high_testingdata_path=os.path.join(self.basepath,'GlucoseData_'+uuid,'Current_Test_Data','High') ###空的資料夾
+        high_testingdata_path=os.path.join(self.basepath,self.splitting_ratio,"GlucoseData",uuid,'Current_Test_Data','High') ###空的資料夾
         if not os.path.exists(high_testingdata_path): os.makedirs(high_testingdata_path)
 
-        low_testingdata_path=os.path.join(self.basepath,'GlucoseData_'+uuid,'Current_Test_Data','Low') ###空的資料夾
+        low_testingdata_path=os.path.join(self.basepath,self.splitting_ratio,"GlucoseData",uuid,'Current_Test_Data','Low') ###空的資料夾
         if not os.path.exists(low_testingdata_path): os.makedirs(low_testingdata_path)
 
         segment_num=int(len(ecgdata)/2500)
@@ -2160,7 +2222,7 @@ class GlucoseThreeClassesPredictor: ###血糖預測類別
 
             ##if(bad_quality_count<segment_num/2): ##超過1/2的訊號品質是好的才進行辨識
             if(good_quality_count>=3): ##超過3 segments的訊號品質是好的才進行辨識
-                glucose_list=self.predict(uuid,self.basepath)
+                glucose_list=self.predict(uuid,self.basepath,self.splitting_ratio)
                 predicted_category=_majority_filtering(glucose_list)
                 errorcode="0"
                 message="Finish predicting the glucose category"
@@ -2207,10 +2269,10 @@ class GlucoseThreeClassesPredictor: ###血糖預測類別
         f.close() 
 
 
-    def predict(self,uuid,basepath):        
+    def predict(self,uuid,basepath,splitting_ratio=""):
         Method='combine'
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        
+
         '''
         print(device)
         print('GPU Count:',torch.cuda.device_count())
@@ -2222,22 +2284,22 @@ class GlucoseThreeClassesPredictor: ###血糖預測類別
             print('Cached:   ', round(torch.cuda.memory_reserved(0)/1024**3,1), 'GB')
         '''
 
-        current_test_path=os.path.join(basepath,'GlucoseData_'+uuid,'Current_Test_Data')
-        
+        current_test_path=os.path.join(basepath,splitting_ratio,"GlucoseData",uuid,'Current_Test_Data')
+
         filelist=os.listdir(current_test_path)
-     
+
         if(len(filelist)==0):
             return -2   ### no testing data
-    
-        
+
+
         testdata = ecgDataset(dir_path = current_test_path, method=Method)
         Batch_size=len(testdata)
-        
+
         test_loader = DataLoader(testdata, batch_size=Batch_size)
 
         model = CNN(data_len=testdata.data_len, input_channel=testdata.channel)
-        model.to(device)        
-        best_model_performance_path = os.path.join(basepath,"Best_ThreeClasses_Model",uuid,"Historic_Best_Performance.txt")
+        model.to(device)
+        best_model_performance_path = os.path.join(basepath,splitting_ratio,"Best_ThreeClasses_Model",uuid,"Historic_Best_Performance.txt")
         performance_txtfile = open(best_model_performance_path)
         count=0
         best_model_path=""
@@ -2247,10 +2309,10 @@ class GlucoseThreeClassesPredictor: ###血糖預測類別
                 string_array=line.split(":")
                 best_model_path=string_array[1]
                 print("best_model:",best_model_path)
-         
+
         performance_txtfile.close()
 
-        model_path = os.path.join(basepath,"Best_ThreeClasses_Model",uuid,best_model_path)
+        model_path = os.path.join(basepath,splitting_ratio,"Best_ThreeClasses_Model",uuid,best_model_path)
         model.load_state_dict(torch.load(model_path))
 
         test_old_data = 0
@@ -2280,30 +2342,31 @@ class GlucoseThreeClassesPredictor: ###血糖預測類別
 
 class GlucoseTwoClassesPredictor: ###血糖預測類別
 
-    def __init__(self,basepath):
-        self.basepath = basepath        
-    
-   
-    def glucose_predict(self,uuid,ecgdata): 
-        
+    def __init__(self,basepath,splitting_ratio=""):
+        self.basepath = basepath
+        self.splitting_ratio = splitting_ratio
+
+
+    def glucose_predict(self,uuid,ecgdata):
+
         errorcode="0"
         message=""
         glucose_list=[]
 
-        current_testingdata_path=os.path.join(self.basepath,'GlucoseData_'+uuid,'Current_Test_Data')
+        current_testingdata_path=os.path.join(self.basepath,self.splitting_ratio,"GlucoseData",uuid,'Current_Test_Data')
         if not os.path.exists(current_testingdata_path): os.makedirs(current_testingdata_path)
 
-        normal_testingdata_path=os.path.join(self.basepath,'GlucoseData_'+uuid,'Current_Test_Data','Normal') ###ECG資料都只放在Normal資料夾
+        normal_testingdata_path=os.path.join(self.basepath,self.splitting_ratio,"GlucoseData",uuid,'Current_Test_Data','Normal') ###ECG資料都只放在Normal資料夾
         if not os.path.exists(normal_testingdata_path): os.makedirs(normal_testingdata_path)
-        
-        old_file_list=os.listdir(normal_testingdata_path)        
+
+        old_file_list=os.listdir(normal_testingdata_path)
         for i,filename in enumerate(old_file_list): ##刪除上次預測的資料
             os.remove(os.path.join(normal_testingdata_path,filename))
 
-        high_testingdata_path=os.path.join(self.basepath,'GlucoseData_'+uuid,'Current_Test_Data','High') ###空的資料夾
+        high_testingdata_path=os.path.join(self.basepath,self.splitting_ratio,"GlucoseData",uuid,'Current_Test_Data','High') ###空的資料夾
         if not os.path.exists(high_testingdata_path): os.makedirs(high_testingdata_path)
 
-        low_testingdata_path=os.path.join(self.basepath,'GlucoseData_'+uuid,'Current_Test_Data','Low') ###空的資料夾
+        low_testingdata_path=os.path.join(self.basepath,self.splitting_ratio,"GlucoseData",uuid,'Current_Test_Data','Low') ###空的資料夾
         if not os.path.exists(low_testingdata_path): os.makedirs(low_testingdata_path)
 
         segment_num=int(len(ecgdata)/2500)
@@ -2323,7 +2386,7 @@ class GlucoseTwoClassesPredictor: ###血糖預測類別
 
             ##if(bad_quality_count<segment_num/2): ##超過1/2的訊號品質是好的才進行辨識
             if(good_quality_count>=3): ##超過3 segments的訊號品質是好的才進行辨識
-                glucose_list=self.predict(uuid,self.basepath)
+                glucose_list=self.predict(uuid,self.basepath,self.splitting_ratio)
                 predicted_category=_majority_filtering(glucose_list)
                 errorcode="0"
                 message="Finish predicting the glucose category"
@@ -2371,7 +2434,7 @@ class GlucoseTwoClassesPredictor: ###血糖預測類別
         f.close() 
 
 
-    def predict(self,uuid,basepath):     
+    def predict(self,uuid,basepath,splitting_ratio=""):
 
         Method='combine'
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -2386,20 +2449,20 @@ class GlucoseTwoClassesPredictor: ###血糖預測類別
             print('Cached:   ', round(torch.cuda.memory_reserved(0)/1024**3,1), 'GB')
         '''
 
-        current_test_path=os.path.join(basepath,'GlucoseData_'+uuid,'Current_Test_Data')
-        
+        current_test_path=os.path.join(basepath,splitting_ratio,"GlucoseData",uuid,'Current_Test_Data')
+
         filelist=os.listdir(current_test_path)
         if(len(filelist)==0):
             return -2   ### no testing data
-    
-        
+
+
         testdata = ecgDataset(dir_path = current_test_path, method=Method,classes=2)
         Batch_size=len(testdata)
         test_loader = DataLoader(testdata, batch_size=Batch_size)
 
         model = TwoClasses_CNN(data_len=testdata.data_len, input_channel=testdata.channel)
-        model.to(device)        
-        best_model_performance_path = os.path.join(basepath,"Best_TwoClasses_Model",uuid,"Historic_Best_Performance.txt")
+        model.to(device)
+        best_model_performance_path = os.path.join(basepath,splitting_ratio,"Best_TwoClasses_Model",uuid,"Historic_Best_Performance.txt")
         performance_txtfile = open(best_model_performance_path)
         count=0
         best_model_path=""
@@ -2409,10 +2472,10 @@ class GlucoseTwoClassesPredictor: ###血糖預測類別
                 string_array=line.split(":")
                 best_model_path=string_array[1]
                 print("best_model:",best_model_path)
-         
+
         performance_txtfile.close()
 
-        model_path = os.path.join(basepath,"Best_TwoClasses_Model",uuid,best_model_path)        
+        model_path = os.path.join(basepath,splitting_ratio,"Best_TwoClasses_Model",uuid,best_model_path)
         model.load_state_dict(torch.load(model_path))
 
         test_old_data = 0
@@ -2441,49 +2504,50 @@ class GlucoseTwoClassesPredictor: ###血糖預測類別
 
 
 class GlucosePredictor:
-    
-    def __init__(self,uuid,basepath):
-        self.uuid=uuid
-        self.basepath=basepath  
-        self.errorcode="0"     
-        self.set_model()  
 
-    def set_model(self):      
+    def __init__(self,uuid,basepath,splitting_ratio=""):
+        self.uuid=uuid
+        self.basepath=basepath
+        self.splitting_ratio=splitting_ratio
+        self.errorcode="0"
+        self.set_model()
+
+    def set_model(self):
         historic_best_sensitivity=0
         historic_best_specificity=0
-        model_historic_best_performance_txtfile = os.path.join(self.basepath,"Best_ThreeClasses_Model",self.uuid,"Historic_Best_Performance.txt")
+        model_historic_best_performance_txtfile = os.path.join(self.basepath,self.splitting_ratio,"Best_ThreeClasses_Model",self.uuid,"Historic_Best_Performance.txt")
         if(os.path.exists(model_historic_best_performance_txtfile)):
             performance_txtfile = open(model_historic_best_performance_txtfile)
             performance_array=[]
             for line in performance_txtfile.readlines():
                 score=line.split(":")
                 performance_array.append(score[-1])
-         
+
             performance_txtfile.close()
 
             historic_best_sensitivity=float(performance_array[0])
             historic_best_specificity=float(performance_array[1])
-        
+
         if (historic_best_sensitivity>0 and historic_best_specificity>0): ###如果三類別歷史績效sensitivity,specificity皆不為0，表示三類別最佳模型存在
-            self.GlucosePredictor_Obj=GlucoseThreeClassesPredictor(self.basepath)
-        else:  ##檢查二類別模型是否存在     
-            model_historic_best_performance_txtfile = os.path.join(self.basepath,"Best_TwoClasses_Model",self.uuid,"Historic_Best_Performance.txt")
+            self.GlucosePredictor_Obj=GlucoseThreeClassesPredictor(self.basepath,self.splitting_ratio)
+        else:  ##檢查二類別模型是否存在
+            model_historic_best_performance_txtfile = os.path.join(self.basepath,self.splitting_ratio,"Best_TwoClasses_Model",self.uuid,"Historic_Best_Performance.txt")
             if(os.path.exists(model_historic_best_performance_txtfile)):
                 performance_txtfile = open(model_historic_best_performance_txtfile)
                 performance_array=[]
                 for line in performance_txtfile.readlines():
                     score=line.split(":")
                     performance_array.append(score[-1])
-         
+
                 performance_txtfile.close()
                 historic_best_sensitivity=float(performance_array[0])
                 historic_best_specificity=float(performance_array[1])
 
             if (historic_best_sensitivity>0 and historic_best_specificity>0): ###如果二類別模型存在
-                self.GlucosePredictor_Obj=GlucoseTwoClassesPredictor(self.basepath)
+                self.GlucosePredictor_Obj=GlucoseTwoClassesPredictor(self.basepath,self.splitting_ratio)
             else: ###連二類模型都不存在
                 self.errorcode="-1"
-                self.message="Model has not been built!"    
+                self.message="Model has not been built!"
             
 
     def predict(self,ecgdata):               
@@ -2501,70 +2565,52 @@ if __name__ == "__main__":
 
     run_start_time = time.perf_counter()
 
-    user_information = [['67', '20240717', '20240730'],
-                        ['1619', '20230909', '20230923'],
-                        ['1631', '20230914', '20230929'],                        
-                        ['1662', '20230922', '20231006'],
-                        ['1672', '20230925', '20231009'],
-                        ['1677', '20230926', '20231029'],  ##5
-                        ['1692', '20231013', '20231110'],  ##criswu(應該超過80歲)
-                        ['1693', '20231016', '20231027'],
-                        ['1726', '20231020', '20231103'],
-                        ['1727', '20231020', '20231101'],
-                        ['1732', '20231028', '20231110'],  ##10(測試集高血糖只有一筆)
-                        ['1737', '20231102', '20231116'],
-                        ['1741', '20231103', '20231117'],
-                        ['1748', '20231105', '20231118'],
-                        ['1828', '20240112', '20240126'],
-                        ['1426', '20230604', '20230628'],  ##15
-                        ['1417', '20230602', '20230611'],  ##目前CSV檔格式有問題
-                        ['1669', '20230924', '20231007'],
-                        ['1798', '20231212', '20231226'],  ##20
-                        ['1742', '20231103', '20231117'],
-                        ['599', '20221129', '20221223'],
-                        ['67', '20240716', '20240724'],
-                        ['88', '20240716', '20240724'],
-                        ['92', '20240607', '20240813'],
-                        ['9', '20240611', '20240614'],
-                        ['88', '20240716', '20240730'],
-                        ['700', '20240716', '20240808']]
+    ##uuid 對應的CSV檔必須已存在於 glucosedata_path 下(例如 2208.csv)
+    ##ECG srj檔：本機 DataDB/<uuid> 已經有資料的話，server_db_path 留空字串即可跳過下載；
+    ##           本機沒有的uuid，把 server_db_path 指到雲端zip所在的實際路徑，會自動下載解壓縮到 DataDB/<uuid>
+    user_information = ['2197','2199','2204','2206','2208','2210','2215','2216','2223','2249']
 
-    basepath=r'C:\Users\belle\Documents\algorithm_blood_glucose-main\Model'  ###血糖數值對應之ECG資料，分析得到特徵檔案會存放在此路徑
-    glucosedata_path=r'C:\Users\belle\Documents\algorithm_blood_glucose-main\GlucoseDataCSV' ###APP收到的血糖數值，整理成CSV檔後存放路徑
-    server_db_path=r'G:\.shortcut-targets-by-id\1mVd2VN2iGQWp7B1dN1zE55tszPd4fL9j\Health_Server'   ###ECG資料所在雲端路徑(Dennis測試用)
+    mother_path=Path(__file__).resolve().parent
+    basepath=str(mother_path/"Model")  ###血糖數值對應之ECG資料，分析得到特徵檔案會存放在此路徑
+    glucosedata_path=str(mother_path/"GlucoseDataCSV") ###APP收到的血糖數值，整理成CSV檔後存放路徑(已存在)
+    server_db_path=r'G:\.shortcut-targets-by-id\1dZUAXwQHDvBJGYwQLNpizVJHhkOfnxVa\Health_Server_Script\_rawdata_download'   ###雲端zip檔所在路徑，請改成實際路徑(要能存取雲端磁碟的電腦才能執行這段)
 
-    for i in range(8,9):  ##range(0,len(user_information)):
-        user_info=user_information[i]
-        ##-------step 1. 基本設定--------
-        uuid=user_info[0]  ##'1662' ##'1732' ##   ##'1828' ##'1741'  ##'1742' ##'1727' ##'1631' ##'1748'
-        start_time=user_info[1] ##'20230922' ##'20231028' ##'20240112' ##'20231103' ##'20231020' ##'20230914' ##'20231105'         ##第一筆血糖資料記錄日期
-        end_time=user_info[2] ##'20231006' ##'20231110'  ##'20240126' ##'20231117' ##'20231102' ##'20230929' ##'20231118'         ##最後一筆血糖資料紀錄日期
-        print('index:',i,' uuid:',uuid)
-        srj_db_path='C:\\Users\\belle\\Documents\\algorithm_blood_glucose-main\\DataDB\\'   ###srj檔放置路徑
+    splitting_ratio="70_30"
+    processnum=8
 
-        ##-------step 2. 血糖模型建立---------
-        #status, errorcode, message = BuildModel(uuid,basepath,srj_db_path,glucosedata_path,server_db_path)  ###建立個人化模型(自動根據是否有低血糖資料，決定訓練中高血糖模型或是高中低血糖模型)
-        status, errorcode, message = BuildModel(uuid, basepath, srj_db_path, glucosedata_path)  ###建立個人化模型(自動根據是否有低血糖資料，決定訓練中高血糖模型或是高中低血糖模型)
-        print('status:',str(status),' error code:',errorcode,' message:',message)
+    ##-------step 1. 依 GlucoseDataCSV 現有的uuid，逐一下載雲端ECG(如需要)並做資料處理，尚未包含模型訓練-------
+    DataArrangement_Obj = DataArrangement()
+    for uuid in user_information:
+        print('uuid:',uuid)
+        srj_db_path=str(mother_path/"DataDB"/uuid)   ###srj檔放置路徑(自雲端下載解壓縮後，或已存在的本機srj檔都放這裡)
 
-    
-        ##--------step 3. 輸入ECG進行血糖類別分類---------   
-        testdatapath=os.path.join(basepath,"TestData",uuid) ##測試用程式
-        if not os.path.exists(testdatapath): os.makedirs(testdatapath)  ##測試用程式 
+        errorcode, message = DataArrangement_Obj.data_processing(uuid, srj_db_path, glucosedata_path, basepath, server_db_path, processnum, splitting_ratio)
+        print('uuid:',uuid,' errorcode:',errorcode,' message:',message)
 
-        filelist=os.listdir(testdatapath) ##測試用程式
-        ecgdata=[] ##測試用程式
-        for i in range(0,len(filelist)): ##測試用程式
-            filename=filelist[i]
-            print('filename:',filename)
-            f = open(os.path.join(testdatapath,filename), "r")
-            for x in f:
-                ecgdata.append(int(x.rstrip('\n')))       
-    
-        GlucosePredictor_Obj=GlucosePredictor(uuid,basepath) 
-        errorcode, message, glucose_category=GlucosePredictor_Obj.predict(ecgdata)
-        print('glucose_category:',glucose_category)
-        print('errorcode:',str(errorcode),' message:',message)     
-     
+    ##-------step 2. 資料備齊後，才需要用 BuildModel 做模型訓練(每個uuid最多20輪x800 epochs，非常耗時，請確認資料處理都成功後再打開這段)-------
+    ##for uuid in user_information:
+    ##    srj_db_path=str(mother_path/"DataDB"/uuid)
+    ##    status, errorcode, message = BuildModel(uuid, basepath, srj_db_path, glucosedata_path, server_db_path, processnum, splitting_ratio)  ###建立個人化模型(自動根據是否有低血糖資料，決定訓練中高血糖模型或是高中低血糖模型)
+    ##    print('uuid:',uuid,' status:',str(status),' error code:',errorcode,' message:',message)
+
+    ##-------step 3. 輸入ECG進行血糖類別分類(模型訓練完成後才能用)-------
+    ##uuid = user_information[0]
+    ##testdatapath=os.path.join(basepath,"TestData",uuid) ##測試用程式
+    ##if not os.path.exists(testdatapath): os.makedirs(testdatapath)  ##測試用程式
+    ##
+    ##filelist=os.listdir(testdatapath) ##測試用程式
+    ##ecgdata=[] ##測試用程式
+    ##for i in range(0,len(filelist)): ##測試用程式
+    ##    filename=filelist[i]
+    ##    print('filename:',filename)
+    ##    f = open(os.path.join(testdatapath,filename), "r")
+    ##    for x in f:
+    ##        ecgdata.append(int(x.rstrip('\n')))
+    ##
+    ##GlucosePredictor_Obj=GlucosePredictor(uuid,basepath,splitting_ratio)
+    ##errorcode, message, glucose_category=GlucosePredictor_Obj.predict(ecgdata)
+    ##print('glucose_category:',glucose_category)
+    ##print('errorcode:',str(errorcode),' message:',message)
+
     run_end_time = time.perf_counter()
     print("Total running time: %.2f seconds" %(run_end_time - run_start_time))

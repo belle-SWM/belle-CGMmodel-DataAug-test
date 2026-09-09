@@ -12,3 +12,9 @@ def rrspread_cal(rri_array):
     rr_spread_value = (maxrri - minrri) / (maxrri + minrri)
     
     return rr_spread_value
+
+def normalization(x):
+   x_max = np.max(x)
+   x_min = np.min(x)
+   x_norm = (x - x_min) / (x_max - x_min+1)  
+   return x_norm

@@ -9,6 +9,9 @@ Author: Benjamin, Liu
 
 import numpy as np
 import os
+import json
+import tempfile
+import glob
 import torch
 import torch.backends.cudnn as cudnn
 import matplotlib.pyplot as plt
@@ -433,30 +436,95 @@ def _checking_ecg_upsidedown_v2(srj_ecg, evaluate_quality=False):
     return usd_flag
 
 
-def upsidedown_correction(srj_ecgs, evaluate_quality=False):  ###主程式
-    
+def _correct_single_srj(srj_path, evaluate_quality=False):
     """
-    input --- 
-        srj_ecg: 單個 srj檔的 ECG訊號
+    處理單一 srj 檔案。
+
+    usd_flag: -1 為無法判斷、0 為正常、1 為已翻轉並覆寫原 srj。
+    """
+    if not os.path.isfile(srj_path):
+        raise FileNotFoundError(f'Could not read srj file: {srj_path}')
+
+    records = []
+    srj_ecg = []
+    with open(srj_path, 'r', encoding='utf-8') as srj_file:
+        for line_no, line in enumerate(srj_file, start=1):
+            if not line.strip():
+                continue
+
+            try:
+                data = json.loads(line)
+                ecg = data['rows']['ecgs']
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                raise ValueError(
+                    f'Invalid srj ECG data at line {line_no}: {srj_path}'
+                ) from exc
+
+            records.append(data)
+            srj_ecg.append(np.asarray(ecg))
+
+    if not srj_ecg:
+        raise ValueError(f'No ECG data found in srj file: {srj_path}')
+
+    usd_flag = _checking_ecg_upsidedown_v2(
+        srj_ecg,
+        evaluate_quality=evaluate_quality
+    )
+
+    if usd_flag == 1:
+        for data in records:
+            data['rows']['ecgs'] = (
+                np.asarray(data['rows']['ecgs']) * -1
+            ).tolist()
+
+        srj_directory = os.path.dirname(os.path.abspath(srj_path))
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode='w',
+                encoding='utf-8',
+                newline='\n',
+                dir=srj_directory,
+                prefix='.upsidedown_',
+                suffix='.tmp',
+                delete=False
+            ) as temp_file:
+                temp_path = temp_file.name
+                for data in records:
+                    temp_file.write(json.dumps(data, ensure_ascii=False))
+                    temp_file.write('\n')
+
+            os.replace(temp_path, srj_path)
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    return usd_flag
+
+
+def upsidedown_correction(srj_db_path, evaluate_quality=False):  ###主程式
+    """
+    input ---
+        srj_db_path: 存放多個 srj 檔案的資料夾路徑
         evaluate_quality: 是否要開啟評估訊號品質機制
     output ---
-        srj_ecgs: 1D list of ECG which has been corrected(已經翻正的ECG訊號)
-
+        result_by_file: {srj 檔案路徑: usd_flag}
+            -1 為無法判斷、0 為正常、1 為已翻轉並覆寫原 srj
     """
-    ###model = load_cnn()   ## Load CNN model for upside-down detection
-    ##upsidedown_flag = [] ## Upside-down result list
-    new_srj_ecgs = []        
-    for srj_ecg in srj_ecgs:           
-        usd_flag = _checking_ecg_upsidedown_v2(srj_ecg, evaluate_quality=evaluate_quality)
-        if usd_flag == 1:
-            for ecgs in srj_ecg:
-                ecgs = np.array(ecgs) * -1
-                new_srj_ecgs.append(ecgs.tolist())
-        else:
-            for ecgs in srj_ecg:
-                new_srj_ecgs.append(ecgs)
+    if not os.path.isdir(srj_db_path):
+        raise NotADirectoryError(f'Could not read srj directory: {srj_db_path}')
 
-    srj_ecgs = new_srj_ecgs
-    
-    return srj_ecgs
+    srj_file_list = sorted(
+        glob.glob(os.path.join(srj_db_path, '*.srj'))
+    )
+    if not srj_file_list:
+        raise FileNotFoundError(f'No srj files found in: {srj_db_path}')
 
+    result_by_file = {}
+    for srj_path in srj_file_list:
+        result_by_file[srj_path] = _correct_single_srj(
+            srj_path,
+            evaluate_quality=evaluate_quality
+        )
+
+    return result_by_file
