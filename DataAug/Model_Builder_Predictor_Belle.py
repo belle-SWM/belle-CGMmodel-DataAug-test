@@ -27,6 +27,15 @@ import bisect
 if os.path.dirname(__file__) not in sys.path:
     sys.path.append(os.path.dirname(__file__))
 
+##srj的tt時間戳與血糖CSV記錄的時間都是台北時間(UTC+8)，但datetime.fromtimestamp()是用「執行當下系統時區」解讀時間，
+##在系統時區不是Asia/Taipei的機器(例如UTC的Linux容器)上執行會讓ECG時間和血糖記錄時間對不起來(差8小時)。
+##這裡固定寫死時區，確保不管在哪台機器/容器上執行，時間換算都一致。
+##time.tzset()只有Unix系統才有，Windows沒有這個函式，但Windows上datetime.fromtimestamp()原本就不吃TZ環境變數，
+##所以在Windows上這裡只是沒作用而已(前提是Windows系統時區本身就是Asia/Taipei)，不會出錯。
+os.environ['TZ'] = 'Asia/Taipei'
+if hasattr(time, 'tzset'):
+    time.tzset()
+
 from SWMlib.motion import *  ##ahrs
 from SWMlib.motion import static_motion_analysis
 from SWMlib.motion import motion_analysis

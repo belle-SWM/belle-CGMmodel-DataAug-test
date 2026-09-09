@@ -232,6 +232,8 @@ def data_processing(self,uuid,srj_db_path,glucosedata_path,basepath,start_time=N
 - `import Model_Builder_Predictor_Belle`：SWMlib 更新後可以正常 import（改動前會因為缺函式直接炸）。
 - 之後有實際拿 uuid `2208` 跑過一次完整的 `DataArrangement.data_processing(...)`（見下一節），驗證了資料處理管線本身可以正常跑完、產出正確的 Train/Test 資料夾結構。
 
+> **⚠️ 以下 2208、2197、2204、2199 這 4 組「實測」數字都是修正時區 bug 之前跑的，已知是錯的，不要拿來用。正確數字請看後面「重大bug：時區錯位」那個章節的修正後結果。**
+
 ## 實測：uuid 2208 資料處理（本機已有 srj，未含雲端下載）
 資料規模：`DataDB/2208` 306 個 srj 檔、共 1.5GB；`GlucoseDataCSV/2208.csv` 1267 筆血糖記錄。`processnum=8`、`splitting_ratio="70_30"`，`server_db_path=""`（本機已有 ECG，跳過雲端下載）。
 
@@ -261,3 +263,57 @@ def data_processing(self,uuid,srj_db_path,glucosedata_path,basepath,start_time=N
 把原本單一 uuid 的示範，改成依 `GlucoseDataCSV` 現有的全部 10 個 uuid（`2197,2199,2204,2206,2208,2210,2215,2216,2223,2249`）跑 `DataArrangement.data_processing(...)`（只做下載+資料處理，**不含模型訓練**）。`BuildModel`（含模型訓練，每個 uuid 最多 20 輪 x 800 epochs，非常耗時）和預測 demo 都先註解掉，避免不小心觸發長時間訓練，需要的話手動打開。
 
 `server_db_path` 目前填的是 Data_Parsing_Belle.py 原本用的雲端路徑，只有在能存取那個 Google Drive 網路磁碟的電腦（例如 Belle 的工作機）才能真的觸發下載；這個容器環境沒有掛載雲端磁碟，所以雲端下載本身沒辦法在這裡驗證，只驗證了「本機已有 srj 檔」這條路徑（就是上面 2208 的實測）。
+
+# 2026/09/09 重大bug：時區錯位造成ECG-血糖配對錯誤（已修正）
+
+## 問題
+這台機器（容器）系統時區是 **UTC**，但 srj 的 `tt` 時間戳與血糖 CSV 記錄的時間，實際上都是**台北時間（UTC+8）**。`_load_all_srj_data`／舊版 `_dataconcate` 都用 `datetime.fromtimestamp(tt)` 把 epoch 轉成日期時間——這個函式是用「執行當下系統的時區」解讀時間，在系統時區本身就是 Asia/Taipei 的機器（例如 Belle 平常用的 Windows 電腦，多半預設就是台北時區）上跑沒問題，但在這台 UTC 容器上跑，換算出來的時間會**系統性慢 8 小時**，導致每一筆 ECG 片段配對到的血糖記錄時間點是錯的。
+
+這不是新引入的 bug，是原本程式（新舊管線都一樣）就存在的「假設執行環境時區＝資料記錄時區」的隱性依賴，只是在這個 UTC 容器上才會出問題。
+
+## 怎麼發現的
+處理 uuid `2204` 時，發現 5 筆高血糖記錄（例如 `2025-02-18 08:46`）在這台機器上完全查不到任何 ECG 片段，一開始以為是那個時段裝置沒收訊。往前查證：
+- 用系統當地時間（UTC）查 `08:41-08:51` → 0 筆（剛好落在 08:30:48~15:58:35 的真實資料空窗期）
+- 往前推 8 小時查 `00:41-00:51`（UTC）→ 60 筆（滿的）
+- 用 `TZ=Asia/Taipei` 重新執行同一段查詢邏輯，直接查 `08:41-08:51` → 60 筆（跟上面 -8小時查到的結果一致）
+
+另外，srj 每日檔案的邊界都剛好落在 UTC 16:00（例如 `2204_20250218.srj` 涵蓋 `2025-02-17 16:00:06` ~ `2025-02-18 15:59:57`），這正好對應「台北午夜」，也佐證了資料本來就是按台北日曆日切檔的。
+
+## 影響範圍
+不只是查不到資料這種明顯狀況——**因為 ECG 大部分時段是連續量測的，時間差 8 小時通常還是能查到「一樣多筆數」的片段，只是查到的其實是另一個時段、跟這筆血糖記錄無關的 ECG**，也就是說在這台容器上處理過的資料，ECG 特徵配對到的血糖標籤幾乎全部是錯的，不是只有查不到資料的那幾筆而已。
+
+在此之前用舊時區跑過的 `2208`、`2197`、`2204`、`2199` 這 4 組資料（見上面幾個「實測」章節）都受影響，已標記為不可用。
+
+## 修正方式
+在 [Model_Builder_Predictor_Belle.py](Model_Builder_Predictor_Belle.py) 開頭（import 區塊之後）加上：
+```python
+os.environ['TZ'] = 'Asia/Taipei'
+if hasattr(time, 'tzset'):
+    time.tzset()
+```
+把時區直接寫死在程式裡，不管之後在哪一台機器/容器上執行都不會再受系統預設時區影響。`time.tzset()` 只有 Unix 系統才有，Windows 沒有這個函式，但 Windows 上 `datetime.fromtimestamp()` 本來就不會吃 `TZ` 環境變數，所以在 Windows（Belle平常的電腦）上這行只是沒作用、不會報錯，前提是 Windows 系統時區本身就是 Asia/Taipei（目前為止都是這樣運作的）。
+
+`multiprocessing.Pool` 在 Linux 預設用 `fork`，子行程會繼承父行程呼叫過 `tzset()` 之後的狀態，所以這個修正對 `data_parsing` 內部平行處理的 worker 也一樣有效，不用額外處理。
+
+## 全部 4 個 uuid 用修正後的版本重新跑過，結果如下
+
+先用 `Clean_Data(uuid, basepath, "70_30")` 清掉舊（錯誤時區）產出的 RawData/Dataset/Features/high_emg_data/GlucoseData，並手動清掉 `bad_data`/`dynamic_data` 底下的殘留，才重新執行 `DataArrangement.data_processing(...)`（設定同前：`processnum=8`、`splitting_ratio="70_30"`、`server_db_path=""`）。
+
+| uuid | 耗時(秒) | Train High/Low/Normal | Test High/Low/Normal | RawData片段數 |
+|---|---|---|---|---|
+| 2208 | 699 | 50 / 514 / 753 | 210 / 750 / 204 | 9614 |
+| 2197 | 733 | 737 / 0 / 1549 | 261 / 0 / 590 | 22594 |
+| 2204 | 784 | 83 / 0 / 1669 | 32 / 0 / 379 | 20704 |
+| 2199 | 1041 | 1140 / 0 / 2278 | 167 / 0 / 1403 | 38401 |
+
+跟修正前的數字比對，變化都很明顯（例如 2208 修正前 Train High/Low/Normal 是 195/431/706，修正後變成 50/514/753；2204 修正前 High 完全是 0，修正後 Train/Test 各有 83/32 筆），證實這是真的會實質影響訓練資料內容的問題，不是可忽略的小誤差。
+
+2204、2197、2199 這三個 uuid 的 Low 都還是 0，這點跟時區無關：實際查證過 2204 的低血糖記錄時間點（2025-03-01之後）本來就超出這個人 srj 資料收集的範圍（最晚到2025-02-28），是資料本身的完整度問題，不是程式錯誤。
+
+## 給之後的提醒
+如果之後要在別的機器/容器上跑這支程式，或是同事的環境時區未知，建議先確認：
+```python
+import time
+print(time.tzname)  # 應該要顯示台北對應的時區資訊，不是 UTC 或別的時區
+```
+如果不放心，也可以比照這次的除錯方式，挑一筆已知血糖記錄時間、直接查那個時間窗口的 ECG 片段數，跟往前後8小時的查詢結果比對，確認沒有錯位。
