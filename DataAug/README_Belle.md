@@ -317,3 +317,42 @@ import time
 print(time.tzname)  # 應該要顯示台北對應的時區資訊，不是 UTC 或別的時區
 ```
 如果不放心，也可以比照這次的除錯方式，挑一筆已知血糖記錄時間、直接查那個時間窗口的 ECG 片段數，跟往前後8小時的查詢結果比對，確認沒有錯位。
+
+# 2026/09/09 幫 M5_DataAug.py 補上 Data Augmentation 開關，並修好兩個既有 bug
+
+## 為什麼要動 M5_DataAug.py
+之前的 data augmentation（見上面「新增 Data Augmentation」章節）只加在 [Model_Builder_Predictor_Belle.py](Model_Builder_Predictor_Belle.py) 裡，[M5_DataAug.py](M5_DataAug.py) 完全沒有 augmentation 相關程式碼。這次要用 M5 訓練「無 augmentation」跟「有 augmentation」兩個版本來比較績效，所以先把同一套 augmentation 機制搬過來，並讓它可以用參數開關，而不是寫死開啟。
+
+## 修掉的既有 bug（跟這次加 augmentation 無關，但擋路）
+1. **`import M5_DataAug` 會直接炸**：[common.py](common.py) 缺少 `train_valid_split_indices` 這個函式（`M5_DataAug.py` 有 import 它），這是先前合併資料處理管線時就發現、記錄在上面「殘留問題，尚未解決」章節、但一直沒補的坑。已經從其他同事（例如 `jane/Result/v2.1.2/common.py`）的版本把同一份函式實作補進 `common.py`。
+2. **`BuildModel()` 整個函式被註解掉，但 `__main__` 還在呼叫它**：`M5_DataAug.py` 最上面那段測試用的 `BuildModel(uuid, base_path, srj_db_path, glucosedata_path, server_db_path, processnum=8, splitting_ratio="70_30")` 整段被註解，`__main__` 直接呼叫會 `NameError`。已經照原本註解掉的邏輯還原成正常函式（依 uuid 底下 Train/Test 資料夾是否同時有 High/Low/Normal 三類資料，自動決定呼叫 `BuildModel_ThreeClasses` 還是 `BuildModel_TwoClasses`），並補上下面第 3 點的 `model_subdir`／`augment` 參數讓它可以往下傳。
+
+驗證：`python -m py_compile M5_DataAug.py` 通過，`import M5_DataAug` 也確認可以正常 import。
+
+## 這次加的 Data Augmentation 開關（做法跟 Model_Builder_Predictor_Belle.py 的版本一致）
+1. **`ECGDataset`** 新增 `augment=False` 參數，並加上 `augment_signal()` 方法：對已完成特徵轉換（normalize + DWT）的訊號做三種隨機增強，各自 50% 機率觸發：
+   - 疊加高斯雜訊（std=0.02）
+   - 振幅隨機縮放 0.9~1.1 倍
+   - 時間軸左右平移最多 ±5 個取樣點
+
+2. 新增 **`ECGDatasetSubset`** 包裝類別（緊接在 `ECGDataset` 之後），依索引挑選子集合，讓 train/valid 可以共用同一份已載入的資料，但各自獨立控制是否啟用 augmentation，避免驗證/測試資料被污染。
+
+3. **`BuildModel_ThreeClasses`**、**`BuildModel_TwoClasses`**、以及還原後的 **`BuildModel`** 三個函式都新增 `model_subdir=""`、`augment=False` 兩個參數（`BuildModel` 會把這兩個參數原封不動往下傳給 `BuildModel_ThreeClasses`/`BuildModel_TwoClasses`）：
+   ```python
+   train_subset = ECGDatasetSubset(dataset, train_indices, augment=augment)  # 訓練集：依參數決定是否增強
+   valid_subset = ECGDatasetSubset(dataset, val_indices, augment=False)      # 驗證集：一律不增強
+   ```
+   測試集（`testdata`/`test_loader`）完全沒變動，維持原本 `ECGDataset(...)` 預設 `augment=False`。
+
+4. 移除不再使用的 `from torch.utils.data import Subset` import（train/valid 改用 `ECGDatasetSubset`，原本的 `Subset` 已經沒有地方用到）。
+
+## 如何用來做「有無 augmentation」比較
+呼叫兩次，`model_subdir` 一定要給不同值，否則第二次會把第一次的 `Best_*Model`/`Temp_*Model` 輸出覆蓋掉：
+```python
+BuildModel_TwoClasses(uuid, basepath, splitting_ratio, model_subdir="NoAug",   augment=False)
+BuildModel_TwoClasses(uuid, basepath, splitting_ratio, model_subdir="WithAug", augment=True)
+```
+三分類同理呼叫 `BuildModel_ThreeClasses`，或直接呼叫還原後的 `BuildModel(...)`（會自動判斷二分類/三分類）並多傳 `model_subdir`、`augment`。
+
+## 尚未驗證
+這次只確認了程式可以正常 import／`py_compile`，還沒有實際跑過訓練比較兩者績效數字（跟前面「有無 augmentation」在 Model_Builder_Predictor_Belle.py 上跑的縮小規模測試不是同一次驗證，`M5_DataAug.py` 這邊用的是不同的 Transformer 架構、分層切分＋BalancedBatchSampler，需要另外實際跑一次才能拿到數字）。等資料傳輸完成、`Model/70_30/GlucoseData/<uuid>` 底下有完整 Train/Test 資料後再實測。

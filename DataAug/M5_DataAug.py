@@ -8,7 +8,6 @@ import pywt
 import torch
 import neurokit2 as nk
 from torch.utils.data.dataset import Dataset
-from torch.utils.data import Subset
 
 from torch.utils.data import DataLoader
 import torch.optim as optim
@@ -51,12 +50,13 @@ def get_version(): ###取得版本號
     return '007'
 
 
-class ECGDataset(Dataset):   
-    def __init__(self, dir_path, method='raw', classes=3):
+class ECGDataset(Dataset):
+    def __init__(self, dir_path, method='raw', classes=3, augment=False):
         self.dir_path = os.path.abspath(dir_path)
         self.method = method
-        self.data_len = 150 
-        
+        self.data_len = 150
+        self.augment = augment
+
         if(classes==2):
             normalSigs = self.read_files('Normal')        
             normalLabels = np.zeros(len(normalSigs))
@@ -86,11 +86,30 @@ class ECGDataset(Dataset):
     def __getitem__(self, index):
         signal = self.Signals[index]
         label = self.Labels[index]
-        
+
+        if self.augment:
+            signal = self.augment_signal(signal)
+
         return signal, label
 
     def __len__(self):
         return len(self.Labels)
+
+    # 對已完成特徵轉換的訊號做輕量資料增強：加雜訊、振幅縮放、時間平移(只用於training data)
+    def augment_signal(self, signal):
+        if torch.rand(1).item() < 0.5:  ##加高斯雜訊
+            noise_std = 0.02
+            signal = signal + torch.randn_like(signal) * noise_std
+
+        if torch.rand(1).item() < 0.5:  ##振幅隨機縮放0.9~1.1倍
+            scale = 1.0 + (torch.rand(1).item() - 0.5) * 0.2
+            signal = signal * scale
+
+        if torch.rand(1).item() < 0.5:  ##時間軸小幅平移
+            shift = int(torch.randint(-5, 6, (1,)).item())
+            signal = torch.roll(signal, shifts=shift, dims=-1)
+
+        return signal
 
     # Parsing files in folder
     def read_files(self, foldername):
@@ -162,6 +181,31 @@ class ECGDataset(Dataset):
         coeffs = np.array(coeffs)
                      
         return coeffs
+
+
+class ECGDatasetSubset(Dataset):
+    """
+    包裝 ECGDataset 的子集合(依索引挑選)，讓 train/valid 可以共用同一份已預先載入、
+    做完特徵轉換的資料，但各自獨立控制是否啟用 data augmentation
+    (train 才需要 augment=True，valid/test 維持 augment=False，避免驗證/測試資料被污染)。
+    """
+    def __init__(self, base_dataset, indices, augment=False):
+        self.base_dataset = base_dataset
+        self.indices = indices
+        self.augment = augment
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        real_index = self.indices[idx]
+        signal = self.base_dataset.Signals[real_index]
+        label = self.base_dataset.Labels[real_index]
+
+        if self.augment:
+            signal = self.base_dataset.augment_signal(signal)
+
+        return signal, label
 
 
 class CNN_Transformer(torch.nn.Module):
@@ -620,57 +664,56 @@ def train_valid_split_indices(labels_array, valid_ratio=0.1, seed=10):
     return train_idx_all, val_idx_all
 '''
 
-# def BuildModel(uuid,base_path,srj_db_path,glucosedata_path,server_db_path,processnum=8,splitting_ratio="70_30"): ##測試用
-# ##def BuildModel(uuid,base_path,srj_db_path,glucosedata_path,processnum=8,splitting_ratio="70_30"):
+def BuildModel(uuid,base_path,srj_db_path,glucosedata_path,server_db_path,processnum=8,splitting_ratio="70_30",model_subdir="",augment=False): ##測試用
 
-#     errorcode="0"
-#     message="" 
-#     status=-1   
-        
-
-#     checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Train","Low")
-#     filelist_low_train=os.listdir(checkedpath)
-
-#     checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Test","Low")
-#     filelist_low_test=os.listdir(checkedpath)
-
-#     checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Train","High")
-#     filelist_high_train=os.listdir(checkedpath)
-
-#     checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Test","High")
-#     filelist_high_test=os.listdir(checkedpath)
-
-#     checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Train","Normal")
-#     filelist_normal_train=os.listdir(checkedpath)
-
-#     checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Test","Normal")
-#     filelist_normal_test=os.listdir(checkedpath)
-
-         
-#     if(len(filelist_low_train)>0 and len(filelist_low_test)>0 and len(filelist_high_train)>0 and len(filelist_high_test)>0 and len(filelist_normal_train)>0 and len(filelist_normal_test)>0):  ###有中，低和高血糖資料
-#         status, errorcode, message=BuildModel_ThreeClasses(uuid,base_path,splitting_ratio)
-#         if(int(errorcode)>=0):
-#             message="Category model with three classes has been built!"   
-    
-#     elif(len(filelist_high_train)==0 or len(filelist_high_test)==0 or len(filelist_normal_train)==0 or len(filelist_normal_test)==0):
-#         errorcode="-402"
-#         message="An error occurs in the BuildModel function of M5.py: No enough normal or high glucose data!"
-#         status=-1
-
-#     else:       
-#       status, errorcode, message=BuildModel_TwoClasses(uuid,base_path,splitting_ratio)
-#       if(int(errorcode)>=0):
-#         message="Category model with two classes has been built!"
-
-    
-#     print('message:',message)
-
-#     return status, errorcode, message   
- 
+    errorcode="0"
+    message=""
+    status=-1
 
 
-def BuildModel_ThreeClasses(uuid,basepath,splitting_ratio="",model_subdir=""):
-   
+    checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Train","Low")
+    filelist_low_train=os.listdir(checkedpath)
+
+    checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Test","Low")
+    filelist_low_test=os.listdir(checkedpath)
+
+    checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Train","High")
+    filelist_high_train=os.listdir(checkedpath)
+
+    checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Test","High")
+    filelist_high_test=os.listdir(checkedpath)
+
+    checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Train","Normal")
+    filelist_normal_train=os.listdir(checkedpath)
+
+    checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Test","Normal")
+    filelist_normal_test=os.listdir(checkedpath)
+
+
+    if(len(filelist_low_train)>0 and len(filelist_low_test)>0 and len(filelist_high_train)>0 and len(filelist_high_test)>0 and len(filelist_normal_train)>0 and len(filelist_normal_test)>0):  ###有中，低和高血糖資料
+        status, errorcode, message=BuildModel_ThreeClasses(uuid,base_path,splitting_ratio,model_subdir,augment)
+        if(int(errorcode)>=0):
+            message="Category model with three classes has been built!"
+
+    elif(len(filelist_high_train)==0 or len(filelist_high_test)==0 or len(filelist_normal_train)==0 or len(filelist_normal_test)==0):
+        errorcode="-402"
+        message="An error occurs in the BuildModel function of M5.py: No enough normal or high glucose data!"
+        status=-1
+
+    else:
+      status, errorcode, message=BuildModel_TwoClasses(uuid,base_path,splitting_ratio,model_subdir,augment)
+      if(int(errorcode)>=0):
+        message="Category model with two classes has been built!"
+
+
+    print('message:',message)
+
+    return status, errorcode, message
+
+
+
+def BuildModel_ThreeClasses(uuid,basepath,splitting_ratio="",model_subdir="",augment=False):
+
     errorcode="0"
     message=""
     status=-1
@@ -756,26 +799,27 @@ def BuildModel_ThreeClasses(uuid,basepath,splitting_ratio="",model_subdir=""):
     train_sampler = BalancedBatchSampler(labels=train_labels, batch_size=Batch_size)
 
     # --- 5. 建立 Dataset 與 DataLoader ---
-    # 訓練集：使用 batch_sampler
-    train_subset = Subset(dataset, train_indices)
+    # 訓練集：使用 batch_sampler；只對training data做data augmentation
+    train_subset = ECGDatasetSubset(dataset, train_indices, augment=augment)
     train_loader = DataLoader(train_subset, batch_sampler=train_sampler)
 
-    # 驗證集：保持原始分布
-    val_subset = Subset(dataset, val_indices)
+    # 驗證集：保持原始分布，不做augmentation
+    val_subset = ECGDatasetSubset(dataset, val_indices, augment=False)
     valid_loader = DataLoader(val_subset, batch_size=Batch_size, shuffle=False)
-    
+
     total_train_num =  len(train_loader)
     total_valid_num = len(valid_loader)
 
     print("total_train_num",total_train_num)
     print("total_valid_num",total_valid_num)
+    print("data augmentation:",augment)
     if(total_train_num<=1 or total_valid_num<=1):
         errorcode="-500"
         message="An error occurs in the BuildModel_ThreeClasses function of M5.py: No training data"
-        status=-1    
-        return  status, errorcode, message  
-      
-    
+        status=-1
+        return  status, errorcode, message
+
+
     current_test_path=os.path.join(basepath,splitting_ratio,"GlucoseData",uuid,"Test")
     testdata = ECGDataset(dir_path = current_test_path, method = Method)        
     test_loader = DataLoader(testdata, batch_size=Batch_size)
@@ -1300,8 +1344,8 @@ def BuildModel_ThreeClasses(uuid,basepath,splitting_ratio="",model_subdir=""):
 
     return status, errorcode, message          
 
-def BuildModel_TwoClasses(uuid,basepath,splitting_ratio="",model_subdir=""):
-    
+def BuildModel_TwoClasses(uuid,basepath,splitting_ratio="",model_subdir="",augment=False):
+
     errorcode="0"
     message=""
     status=-1
@@ -1387,27 +1431,28 @@ def BuildModel_TwoClasses(uuid,basepath,splitting_ratio="",model_subdir=""):
     train_sampler = BalancedBatchSampler(labels=train_labels, batch_size=Batch_size)
 
     # --- 5. 建立 Dataset 與 DataLoader ---
-    # 訓練集：使用 batch_sampler
-    train_subset = Subset(dataset, train_indices)
+    # 訓練集：使用 batch_sampler；只對training data做data augmentation
+    train_subset = ECGDatasetSubset(dataset, train_indices, augment=augment)
     train_loader = DataLoader(train_subset, batch_sampler=train_sampler)
 
-    # 驗證集：保持原始分布
-    val_subset = Subset(dataset, val_indices)
+    # 驗證集：保持原始分布，不做augmentation
+    val_subset = ECGDatasetSubset(dataset, val_indices, augment=False)
     valid_loader = DataLoader(val_subset, batch_size=Batch_size, shuffle=False)
-    
+
     total_train_num =  len(train_loader)
     total_valid_num = len(valid_loader)
-    
+
     print("total_train_num",total_train_num)
     print("total_valid_num",total_valid_num)
+    print("data augmentation:",augment)
     if(total_train_num<=1 or total_valid_num<=1):
         errorcode="-500"
         message="An error occurs in the BuildModel_TwoClasses function of M5.py: No training data"
-        status=-1    
-        return  status, errorcode, message  
-    
-    
-    
+        status=-1
+        return  status, errorcode, message
+
+
+
     current_test_path=os.path.join(basepath,splitting_ratio,"GlucoseData",uuid,"Test")
     
     '''
