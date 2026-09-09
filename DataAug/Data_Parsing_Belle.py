@@ -1117,8 +1117,11 @@ if __name__ == "__main__":
     glucosedata_path=str(glucosedata_path)
     server_db_path=r'G:\.shortcut-targets-by-id\1dZUAXwQHDvBJGYwQLNpizVJHhkOfnxVa\Health_Server_Script\_rawdata_download'
    
+    #只選擇特定uuid進行測試
+    user_information = [user for user in user_information if user[0] in ['2197', '2199', '2204', '2206', '2208', '2210', '2215', '2216', '2223', '2249']]
+     
          
-    for i in range(0,63): 
+    for i in range(0,10): 
 
         print('index:',i)       
         
@@ -1129,11 +1132,11 @@ if __name__ == "__main__":
         end_time=user_info[2]    ##最後一筆血糖資料紀錄日期
         print('index:',i,' uuid:',uuid)
 
-        if(uuid !='2279' and uuid!='2276' and uuid!='2286' and uuid!='2285' and uuid!='2306' and uuid!='2322' and uuid!='2329' and uuid!='2352'
-           and uuid!='2215' and uuid!='2221' and uuid!='2227' and uuid!='2226' and uuid!='2131' and uuid!='2199'):
-            continue
+        # if(uuid !='2279' and uuid!='2276' and uuid!='2286' and uuid!='2285' and uuid!='2306' and uuid!='2322' and uuid!='2329' and uuid!='2352'
+        #    and uuid!='2215' and uuid!='2221' and uuid!='2227' and uuid!='2226' and uuid!='2131' and uuid!='2199'):
+        #     continue
         
-        srj_db_path='D:\\DataDB\\'+uuid   ###srj檔放置路徑
+        srj_db_path=r'C:\Users\belle\Documents\algorithm_blood_glucose-main\DataAug\DataDB\\' +uuid   ###srj檔放置路徑
                 
         start_time = time.time()       
         ##-------step 2. 血糖模型建立---------
