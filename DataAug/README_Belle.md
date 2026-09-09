@@ -245,6 +245,18 @@ def data_processing(self,uuid,srj_db_path,glucosedata_path,basepath,start_time=N
 - 三個類別（High/Low/Normal）在 Train/Test 都有資料，代表這個 uuid 可以直接用 `BuildModel_ThreeClasses` 訓練三分類模型。
 - 觀察到的效能瓶頸：8 個 process 各自獨立載入完整的 306 個 srj 檔進記憶體（`_load_all_srj_data` 設計上是每個 process 各載入一次），2208 這個案例每個 process 吃到約 9GB RAM。之後如果遇到 srj 檔案量更大的 uuid，記憶體可能會是比 CPU 更早撞到的瓶頸，需要視情況調低 `processnum`。
 
+## 實測：uuid 2197 資料處理（本機已有 srj，未含雲端下載）
+資料規模：`DataDB/2197` 14 個 srj 檔、共 2.2GB；`GlucoseDataCSV/2197.csv`。設定同上（`processnum=8`、`splitting_ratio="70_30"`、`server_db_path=""`）。
+
+- 耗時：557 秒（≈9.3 分鐘），`errorcode="0"`。
+- 產出 `Model/70_30/GlucoseData/2197/`：
+  | | High | Low | Normal |
+  |---|---|---|---|
+  | Train | 364 | 0 | 1676 |
+  | Test | 166 | 0 | 510 |
+- `Model/RawData/2197` 累積 22440 筆通過品質檢查的 ECG 片段。
+- 這個 uuid **沒有 Low 資料**，`BuildModel()` 裡的判斷邏輯會自動偵測到並改走 `BuildModel_TwoClasses`（Normal vs High 二分類），不需要額外處理。
+
 ## `__main__` 改成批次下載＋處理迴圈
 把原本單一 uuid 的示範，改成依 `GlucoseDataCSV` 現有的全部 10 個 uuid（`2197,2199,2204,2206,2208,2210,2215,2216,2223,2249`）跑 `DataArrangement.data_processing(...)`（只做下載+資料處理，**不含模型訓練**）。`BuildModel`（含模型訓練，每個 uuid 最多 20 輪 x 800 epochs，非常耗時）和預測 demo 都先註解掉，避免不小心觸發長時間訓練，需要的話手動打開。
 
