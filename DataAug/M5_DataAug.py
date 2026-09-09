@@ -620,52 +620,53 @@ def train_valid_split_indices(labels_array, valid_ratio=0.1, seed=10):
     return train_idx_all, val_idx_all
 '''
 
-# def BuildModel(uuid,base_path,srj_db_path,glucosedata_path,server_db_path,processnum=8,splitting_ratio="70_30"): ##測試用
-# ##def BuildModel(uuid,base_path,srj_db_path,glucosedata_path,processnum=8,splitting_ratio="70_30"):
+def BuildModel(uuid,base_path,splitting_ratio="70_30"):
+    ###這支檔案不做資料處理(下載/解析/分Train-Test)，只讀取已經存在的 Model/<splitting_ratio>/GlucoseData/<uuid>，
+    ###資料處理請改用 Model_Builder_Predictor_Belle.py 的 DataArrangement.data_processing/data_arrangement
 
-#     errorcode="0"
-#     message="" 
-#     status=-1   
-        
+    errorcode="0"
+    message=""
+    status=-1
 
-#     checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Train","Low")
-#     filelist_low_train=os.listdir(checkedpath)
 
-#     checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Test","Low")
-#     filelist_low_test=os.listdir(checkedpath)
+    checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Train","Low")
+    filelist_low_train=os.listdir(checkedpath)
 
-#     checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Train","High")
-#     filelist_high_train=os.listdir(checkedpath)
+    checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Test","Low")
+    filelist_low_test=os.listdir(checkedpath)
 
-#     checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Test","High")
-#     filelist_high_test=os.listdir(checkedpath)
+    checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Train","High")
+    filelist_high_train=os.listdir(checkedpath)
 
-#     checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Train","Normal")
-#     filelist_normal_train=os.listdir(checkedpath)
+    checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Test","High")
+    filelist_high_test=os.listdir(checkedpath)
 
-#     checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Test","Normal")
-#     filelist_normal_test=os.listdir(checkedpath)
+    checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Train","Normal")
+    filelist_normal_train=os.listdir(checkedpath)
 
-         
-#     if(len(filelist_low_train)>0 and len(filelist_low_test)>0 and len(filelist_high_train)>0 and len(filelist_high_test)>0 and len(filelist_normal_train)>0 and len(filelist_normal_test)>0):  ###有中，低和高血糖資料
-#         status, errorcode, message=BuildModel_ThreeClasses(uuid,base_path,splitting_ratio)
-#         if(int(errorcode)>=0):
-#             message="Category model with three classes has been built!"   
-    
-#     elif(len(filelist_high_train)==0 or len(filelist_high_test)==0 or len(filelist_normal_train)==0 or len(filelist_normal_test)==0):
-#         errorcode="-402"
-#         message="An error occurs in the BuildModel function of M5.py: No enough normal or high glucose data!"
-#         status=-1
+    checkedpath=os.path.join(base_path,splitting_ratio,"GlucoseData",uuid,"Test","Normal")
+    filelist_normal_test=os.listdir(checkedpath)
 
-#     else:       
-#       status, errorcode, message=BuildModel_TwoClasses(uuid,base_path,splitting_ratio)
-#       if(int(errorcode)>=0):
-#         message="Category model with two classes has been built!"
 
-    
-#     print('message:',message)
+    if(len(filelist_low_train)>0 and len(filelist_low_test)>0 and len(filelist_high_train)>0 and len(filelist_high_test)>0 and len(filelist_normal_train)>0 and len(filelist_normal_test)>0):  ###有中，低和高血糖資料
+        status, errorcode, message=BuildModel_ThreeClasses(uuid,base_path,splitting_ratio)
+        if(int(errorcode)>=0):
+            message="Category model with three classes has been built!"
 
-#     return status, errorcode, message   
+    elif(len(filelist_high_train)==0 or len(filelist_high_test)==0 or len(filelist_normal_train)==0 or len(filelist_normal_test)==0):
+        errorcode="-402"
+        message="An error occurs in the BuildModel function of M5.py: No enough normal or high glucose data!"
+        status=-1
+
+    else:
+      status, errorcode, message=BuildModel_TwoClasses(uuid,base_path,splitting_ratio)
+      if(int(errorcode)>=0):
+        message="Category model with two classes has been built!"
+
+
+    print('message:',message)
+
+    return status, errorcode, message
  
 
 
@@ -1917,10 +1918,13 @@ if __name__ == "__main__":
     glucosedata_path=r'D:\Dennis Project\Glucose_CSV\CGM_CSV'
     ##glucosedata_path=r'D:\Dennis Project\Glucose_CSV\BGM_CSV\filtered_BGM'
     glucosedata_path=str(glucosedata_path)
-    server_db_path='G:\\.shortcut-targets-by-id\\1Mc_sTYrGzDau1JPki2AQDpV4FeX5tKu3\\SWM_DataCenter\\Health_Server_Script\\_rawdata_download'
-   
-         
-    for i in range(0,17):
+    server_db_path=r'G:\.shortcut-targets-by-id\1dZUAXwQHDvBJGYwQLNpizVJHhkOfnxVa\Health_Server_Script\_rawdata_download'
+
+    #只選擇特定uuid進行測試
+    user_information = [user for user in user_information if user[0] in ['2197', '2199', '2204', '2206', '2208', '2210', '2215', '2216', '2223', '2249']]
+     
+
+    for i in range(0,len(user_information)):
         print('index:',i)       
 
         user_info=user_information[i]
@@ -1928,24 +1932,13 @@ if __name__ == "__main__":
         ##-------step 1. 基本設定--------
         uuid=user_info[0]   
         
-        '''
-        if(uuid !='2133' and uuid!='2131' and uuid!='2208' and uuid!='2205'):
-            continue
-        '''
-
-        if(uuid !='2131'):
-            continue
-              
         start_time=user_info[1]  ##第一筆血糖資料記錄日期
         end_time=user_info[2]    ##最後一筆血糖資料紀錄日期
         print('index:',i,' uuid:',uuid)
-        srj_db_path='C:\\Users\\User\\Desktop\\DataDB\\'+uuid   ###srj檔放置路徑
-        
-        
-        start_time = time.time()       
-        ##-------step 2. 血糖模型建立---------
-        ##status, errorcode, message = BuildModel(uuid, base_path, srj_db_path, glucosedata_path, processnum=8, splitting_ratio="70_30")  ##建立個人化模型(自動根據是否有低血糖資料，決定訓練中高血糖模型或是高中低血糖模型)
-        status, errorcode, message = BuildModel(uuid,base_path,srj_db_path,glucosedata_path,server_db_path,processnum=8,splitting_ratio="70_30")
+
+        start_time = time.time()
+        ##-------step 2. 血糖模型建立(GlucoseData 已經由 Model_Builder_Predictor_Belle.py 準備好)---------
+        status, errorcode, message = BuildModel(uuid,base_path,splitting_ratio="70_30")
         end_time = time.time()
         execution_time = end_time - start_time
         print(f"函式執行時間: {execution_time:.6f} 秒")

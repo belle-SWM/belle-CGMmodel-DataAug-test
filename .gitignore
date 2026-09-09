@@ -1,0 +1,27 @@
+# 虛擬環境
+venv/
+
+# Python 快取
+__pycache__/
+*.pyc
+
+# 資料與模型輸出（體積大、常變動，不進版控）
+DataDB/
+DataDB_fromNEW/
+GlucoseDataCSV/
+Model/
+Model_fromNEW/
+
+# 資料檔案格式
+*.csv
+*.json
+*.zip
+*.xlsx
+
+# 訓練好的模型權重檔（體積大，不進版控）
+*.pth
+
+# IDE
+.vscode/
+.idea/
+desktop.ini
