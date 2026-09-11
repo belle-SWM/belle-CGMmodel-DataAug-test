@@ -13,7 +13,8 @@
 #
 # 輸出：
 #     terminal 大表
-#     Model/<splitting_ratio>/comparison/comparison.csv
+#     Model/<splitting_ratio>/comparison/comparison_TwoClasses.csv
+#     Model/<splitting_ratio>/comparison/comparison_ThreeClasses.csv
 #     Model/<splitting_ratio>/comparison/comparison_TwoClasses.png
 #     Model/<splitting_ratio>/comparison/comparison_ThreeClasses.png
 # ============================================================
@@ -237,20 +238,44 @@ def print_table(rows, modes, baseline):
                 print('     沒有任何 uuid 是所有模式都有的，無法算出可比較的平均。')
 
 
-def write_csv(rows, out_path):
-    """收錄解析到的所有欄位，不只主表那四個"""
+def write_csv(rows, out_dir):
+    """每個分類各輸出一份 CSV。
+
+    原本是一份合併的 comparison.csv，有兩個問題：
+      1. 依 classes 字串排序時 'ThreeClasses' < 'TwoClasses'，二分類整批被推到檔案後半，
+         從頭看會誤以為二分類沒有被收錄。
+      2. 兩種分類的欄位本來就不同(二分類只有 TP/FP/FN/TN；三分類是 *_High/_Low/_Normal)，
+         合併寫的話每一列都有一半欄位是空的。
+    分開寫兩個問題都沒了，檔名也跟 PNG 一致。
+    每份只收該分類真正有值的欄位，不會出現整欄空白。
+    """
     fixed = ['uuid', 'classes', 'mode', 'source_file']
-    extra = sorted({k for r in rows for k in r} - set(fixed))
-    ###主指標排前面，其餘（各類別 sensitivity、TP/FP/FN/TN、Model_Name）跟在後面
-    ordered = [m for m in HEADLINE_METRICS if m in extra] + \
-              [k for k in extra if k not in HEADLINE_METRICS]
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, 'w', newline='', encoding='utf-8-sig') as fh:
-        writer = csv.DictWriter(fh, fieldnames=fixed + ordered)
-        writer.writeheader()
-        for r in sorted(rows, key=lambda r: (r['classes'], r['uuid'], r['mode'])):
-            writer.writerow(r)
-    print('\nCSV 已輸出: %s' % out_path)
+    os.makedirs(out_dir, exist_ok=True)
+
+    ###舊版留下的合併檔會過期，順手清掉避免跟新檔混淆
+    legacy = os.path.join(out_dir, 'comparison.csv')
+    if os.path.exists(legacy):
+        os.remove(legacy)
+        print('已移除舊的合併檔: %s' % legacy)
+
+    paths = []
+    for classes, _ in CLASS_DIRS:
+        sub = [r for r in rows if r['classes'] == classes]
+        if not sub:
+            continue
+        present = {k for r in sub for k, v in r.items() if v not in (None, '')}
+        extra = sorted(present - set(fixed))
+        ordered = [m for m in HEADLINE_METRICS if m in extra] + \
+                  [k for k in extra if k not in HEADLINE_METRICS]
+        path = os.path.join(out_dir, 'comparison_%s.csv' % classes)
+        with open(path, 'w', newline='', encoding='utf-8-sig') as fh:
+            writer = csv.DictWriter(fh, fieldnames=fixed + ordered, extrasaction='ignore')
+            writer.writeheader()
+            for r in sorted(sub, key=lambda r: (r['uuid'], r['mode'])):
+                writer.writerow(r)
+        paths.append(path)
+        print('CSV 已輸出: %s (%d 列, %d 欄)' % (path, len(sub), len(fixed) + len(ordered)))
+    return paths
 
 
 def plot(rows, modes, out_dir, ratio):
@@ -363,7 +388,7 @@ def main():
     print_table(rows, modes, baseline)
 
     out_dir = args.out_dir or os.path.join(args.basepath, args.splitting_ratio, 'comparison')
-    write_csv(rows, os.path.join(out_dir, 'comparison.csv'))
+    write_csv(rows, out_dir)
     if not args.no_plot:
         plot(rows, modes, out_dir, args.splitting_ratio)
     return 0

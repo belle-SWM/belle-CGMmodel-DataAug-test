@@ -97,7 +97,7 @@ class ECGDataset(Dataset):
 
     # 對已完成特徵轉換的訊號做輕量資料增強(只用於training data)
     # 每一種增強由檔案開頭的 AUG_* 開關控制，方便單獨測試或之後評估組合
-    def augment_signal(self, signal):
+    def augment_signal(self, signal, mix_pool=None, all_signals=None):
         if AUG_GAUSSIAN_NOISE and torch.rand(1).item() < 0.5:  ##加高斯雜訊
             noise_std = 0.02
             signal = signal + torch.randn_like(signal) * noise_std
@@ -135,6 +135,19 @@ class ECGDataset(Dataset):
                                  mode='linear', align_corners=True).view(-1).clone()
             gain[0] = 1.0   ###DC 不動，避免整體基線飄移
             signal = torch.fft.irfft(spec * gain, n=sig_len, dim=-1)
+
+        ##同類別 mixup：跟「同一類別、且同屬 train 的另一筆」做加權平均
+        if (AUG_SAME_CLASS_MIXUP and mix_pool is not None and all_signals is not None
+                and len(mix_pool) > 1 and torch.rand(1).item() < 0.5):
+            ###只跟同類別混合，混出來的樣本標籤才不會變。跨類別 mixup 需要軟標籤，
+            ###但訓練用的是硬標籤(target.view(-1).long() + FocalLoss)，會直接吃到錯標籤。
+            ###夥伴一定要從 train 索引裡抽(mix_pool 由 ECGDatasetSubset 依 self.indices 建立)，
+            ###從整個 dataset 抽會把 valid 資料透過 augmentation 洩漏進 train。
+            ###註：每筆樣本本身已是 10 秒內多拍的平均波，再混一筆等於平均更多拍，
+            ###   所以類別內變異會下降(實測剩約 80%)，訓練資料會比測試資料乾淨一些。
+            j = mix_pool[int(torch.randint(len(mix_pool), (1,)).item())]
+            lam = MIXUP_LAMBDA_MIN + (1.0 - MIXUP_LAMBDA_MIN) * torch.rand(1).item()
+            signal = lam * signal + (1.0 - lam) * all_signals[j]
 
         return signal
 
@@ -221,6 +234,15 @@ class ECGDatasetSubset(Dataset):
         self.indices = indices
         self.augment = augment
 
+        ###同類別 mixup 用的抽樣池：key 是標籤，value 是該類別的索引清單。
+        ###只收 self.indices(= 這個 subset 自己的索引)，所以 train subset 只會抽到 train 樣本，
+        ###不會把 valid 資料混進訓練。valid subset 是 augment=False，根本不會用到。
+        self.class_pool = {}
+        if self.augment:
+            for i in self.indices:
+                lbl = int(base_dataset.Labels[i].item())
+                self.class_pool.setdefault(lbl, []).append(i)
+
     def __len__(self):
         return len(self.indices)
 
@@ -230,7 +252,10 @@ class ECGDatasetSubset(Dataset):
         label = self.base_dataset.Labels[real_index]
 
         if self.augment:
-            signal = self.base_dataset.augment_signal(signal)
+            signal = self.base_dataset.augment_signal(
+                signal,
+                mix_pool=self.class_pool.get(int(label.item())),
+                all_signals=self.base_dataset.Signals)
 
         return signal, label
 
@@ -2017,19 +2042,26 @@ if __name__ == "__main__":
          
     target_uuids=['2197','2199','2204','2206','2208','2210','2215','2216','2223','2249']  ###這次要訓練的uuid(Model/70_30/GlucoseData/<uuid>底下已有Train/Test資料)
 
-    model_subdir="WithAug_3"   ###無augmentation版本，輸出到Model/70_30/NoAug底下；要跑有augmentation版本請改成"WithAug"並把augment改成True，否則會覆蓋掉這次的結果
+    model_subdir="WithAug_4"   ###每跑一種新的增強組合就換一個編號，否則會覆蓋掉上一輪的結果
     augment=True
     ###──── Data Augmentation 開關 ──────────────────────────────────────────
-    ###這次要單獨測試「頻域平滑幅度擾動」的效果，所以先把原本三種時域增強關掉。
-    ###用開關而不是註解掉：之後要評估綜合方式時只要改這幾個值，不必再動 augment_signal。
+    ###一次只開一種來單獨評估，跑完換一個 model_subdir 編號，最後再評估綜合組合。
+    ###已單獨測過：WithAug_3 = 只開 AUG_FREQ_MAGNITUDE。
+    ###這次(WithAug_4) = 只開 AUG_SAME_CLASS_MIXUP。
     AUG_GAUSSIAN_NOISE   = False   ##加高斯雜訊
     AUG_AMPLITUDE_SCALE  = False   ##振幅隨機縮放 0.9~1.1 倍
     AUG_TIME_SHIFT       = False   ##時間軸剛性平移(邊緣補值)
-    AUG_FREQ_MAGNITUDE   = True    ##頻域平滑幅度擾動(只動幅度包絡，相位不動)
+    AUG_FREQ_MAGNITUDE   = False   ##頻域平滑幅度擾動(只動幅度包絡，相位不動) -- WithAug_3 已單獨測過
+
+    AUG_SAME_CLASS_MIXUP = True    ##同類別 mixup(只跟同類別的另一筆加權平均)
 
     ###頻域擾動的參數
     FREQ_AUG_AMPLITUDE   = 0.4     ##增益包絡的擾動幅度(±40%)
     FREQ_AUG_CONTROL_PTS = 5       ##控制點數，越少包絡越平滑、越不易產生 ringing
+
+    ###同類別 mixup 的參數：lam 從 [MIXUP_LAMBDA_MIN, 1] 均勻抽，
+    ###lam 越接近 1 代表保留原樣本越多。0.5 表示最多對半混。
+    MIXUP_LAMBDA_MIN     = 0.5
 
     for i in range(0,len(user_information)):
 

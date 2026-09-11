@@ -404,10 +404,10 @@ for i in range(0,len(user_information)):
 
 | 參數 | 原本（三分類 / 二分類） | 改成 | 位置 |
 |---|---|---|---|
-| 訓練輪數 | 20 / 20 | **5** | [L898](M5_DataAug.py#L898)、[L1548](M5_DataAug.py#L1548) |
-| Epoch 上限 | 800 / 800 | **300** | [L794](M5_DataAug.py#L794)、[L1440](M5_DataAug.py#L1440) |
-| Early-stop patience | 50 / **100** | **30** | [L795](M5_DataAug.py#L795)、[L1441](M5_DataAug.py#L1441) |
-| Scheduler patience | 50 / 100 | **15** | [L931](M5_DataAug.py#L931)、[L1584](M5_DataAug.py#L1584) |
+| 訓練輪數 | 20 / 20 | **5** | [L923](M5_DataAug.py#L923)、[L1573](M5_DataAug.py#L1573) |
+| Epoch 上限 | 800 / 800 | **300** | [L819](M5_DataAug.py#L819)、[L1465](M5_DataAug.py#L1465) |
+| Early-stop patience | 50 / **100** | **30** | [L820](M5_DataAug.py#L820)、[L1466](M5_DataAug.py#L1466) |
+| Scheduler patience | 50 / 100 | **15** | [L956](M5_DataAug.py#L956)、[L1609](M5_DataAug.py#L1609) |
 
 預估降到每個 uuid 約 20～25 分鐘、10 個 uuid 約 3.5～4 小時，NoAug＋WithAug 兩邊合計約 7～8 小時。
 
@@ -418,12 +418,12 @@ for i in range(0,len(user_information)):
 2. **scheduler patience 拆成獨立變數 `scheduler_patience`**：三分類原本是 `ReduceLROnPlateau(..., patience=patience)`，直接複用 early-stop 的 `patience`；兩者相等時 LR 永遠不會衰減就先被 early stop 停掉，`ReduceLROnPlateau` 等於白設。現在 `scheduler_patience=15` < `patience=30`，LR 至少有一次衰減的機會。
 
 ## 這次沒有改的東西
-`ReduceLROnPlateau(..., verbose=1, ...)` 保留不動。前面 2026/09/08 那節提到這個參數在 PyTorch 2.8 會丟 `TypeError`，但這台機器（H100 80GB HBM3）的環境是 **torch 2.5.1+cu121**，`verbose` 還在（只是 deprecated），不會炸。如果之後換到 2.8 以上的環境跑 M5，這兩處（[L931](M5_DataAug.py#L931)、[L1584](M5_DataAug.py#L1584)）要比照 Model_Builder_Predictor_Belle.py 拿掉 `verbose`。
+`ReduceLROnPlateau(..., verbose=1, ...)` 保留不動。前面 2026/09/08 那節提到這個參數在 PyTorch 2.8 會丟 `TypeError`，但這台機器（H100 80GB HBM3）的環境是 **torch 2.5.1+cu121**，`verbose` 還在（只是 deprecated），不會炸。如果之後換到 2.8 以上的環境跑 M5，這兩處（[L956](M5_DataAug.py#L956)、[L1609](M5_DataAug.py#L1609)）要比照 Model_Builder_Predictor_Belle.py 拿掉 `verbose`。
 
 ## 怎麼確認訓練真的在 GPU 上
 容器環境裡 `nvidia-smi` 下方的 Processes 表格會是空的（PID namespace 隔離，查詢會顯示 `[Not Found]`），**不能**因為那張表沒列出 process 就以為沒用到 GPU。可靠的確認方式：
 
-1. 看程式自己印的 log（[L903-911](M5_DataAug.py#L903-L911)、[L1554-1562](M5_DataAug.py#L1554-L1562)）每輪開頭會印 `cuda:0`、`GPU Count: 1`、`NVIDIA H100 80GB HBM3`；掉回 CPU 會印 `cpu` 且沒有裝置名稱。
+1. 看程式自己印的 log（[L928-936](M5_DataAug.py#L928-L936)、[L1579-1587](M5_DataAug.py#L1579-L1587)）每輪開頭會印 `cuda:0`、`GPU Count: 1`、`NVIDIA H100 80GB HBM3`；掉回 CPU 會印 `cpu` 且沒有裝置名稱。
 2. `ls -l /proc/$(pgrep -f M5_DataAug)/fd | grep nvidia` 看 process 有沒有開 `/dev/nvidiaN`（`nvidia-smi -q | grep -i "minor number"` 可以對應是哪張卡）。
 3. `nvidia-smi` 看 GPU-Util／Memory-Usage 有沒有在動。
 
@@ -472,8 +472,8 @@ cd /share/Belle/DataAug && python M5_DataAug.py 2>&1 | tee train_noaug_$(date +%
 
 | 檔案 | 位置 | tag |
 |---|---|---|
-| M5_DataAug.py | [L1041](M5_DataAug.py#L1041) | ThreeClasses |
-| M5_DataAug.py | [L1672](M5_DataAug.py#L1672) | TwoClasses |
+| M5_DataAug.py | [L1066](M5_DataAug.py#L1066) | ThreeClasses |
+| M5_DataAug.py | [L1697](M5_DataAug.py#L1697) | TwoClasses |
 | Model_Builder_Predictor_Belle.py | [L1625](Model_Builder_Predictor_Belle.py#L1625) | ThreeClasses |
 | Model_Builder_Predictor_Belle.py | [L2037](Model_Builder_Predictor_Belle.py#L2037) | TwoClasses |
 
@@ -492,7 +492,7 @@ if Epoch_range[0] == 0:
 
 `Loss_list` / `ACCs` 的初始化被包在「從第 0 個 epoch 開始」的守衛裡，但迴圈內的 `Loss_list.append(...)` 是無條件執行的。只要用非零的 `Epoch_range` 續訓，第一個 epoch 就會 `NameError: name 'Loss_list' is not defined`。
 
-已把兩行初始化移到 `if` 外面（[M5 L915](M5_DataAug.py#L915)、[M5 L1565](M5_DataAug.py#L1565)、[MBP L1507](Model_Builder_Predictor_Belle.py#L1507)、[MBP L1926](Model_Builder_Predictor_Belle.py#L1926)），建立模型那段仍然留在守衛內。目前的 `__main__` 都是從 0 開始跑，所以這個 bug 還沒被踩到，但新加的記錄功能會用到續訓路徑，先修掉。
+已把兩行初始化移到 `if` 外面（[M5 L940](M5_DataAug.py#L940)、[M5 L1590](M5_DataAug.py#L1590)、[MBP L1507](Model_Builder_Predictor_Belle.py#L1507)、[MBP L1926](Model_Builder_Predictor_Belle.py#L1926)），建立模型那段仍然留在守衛內。目前的 `__main__` 都是從 0 開始跑，所以這個 bug 還沒被踩到，但新加的記錄功能會用到續訓路徑，先修掉。
 
 ## 驗證
 - `save_training_history()` 單獨測過：一般情況、續訓合併（epoch 1–3 存檔後再存 4–5，CSV 正確接成 1–5）、混入 torch tensor 的 accuracy、空 list 回傳 `(None, None)` 不炸，PNG 有實際開起來看過。
@@ -660,7 +660,7 @@ rfft 只有 76 個 bin，解析度 1.67 Hz。能量分布：0–5 Hz 佔 23.5%�
 ## 實作：改用開關，這次只測頻域
 為了單獨測試頻域擾動，**沒有把舊的增強註解掉，改成用開關控制**，之後要評估組合時只要改這幾個值，不必再動 `augment_signal`：
 
-> 註：這組開關當初加在檔案開頭（模組層級），後來被移到 `__main__` 裡跟 `model_subdir`／`augment` 放在一起（[L2025-2032](M5_DataAug.py#L2025-L2032)）。詳見 2026/09/11 `compare_results.py` 那一節的說明。
+> 註：這組開關當初加在檔案開頭（模組層級），後來被移到 `__main__` 裡跟 `model_subdir`／`augment` 放在一起（[L2051-2064](M5_DataAug.py#L2051-L2064)）。詳見 2026/09/11 `compare_results.py` 那一節的說明。
 
 ```python
 AUG_GAUSSIAN_NOISE   = False   ##加高斯雜訊
@@ -732,7 +732,7 @@ output_excel = os.path.join(basepath, uuid+"_Performance_Matrix.xlsx")
 而 `Model/` 根目錄那 10 個 xlsx 的時間是 **2026-09-11 01:57 ~ 03:05**，對應的是 WithAug_2。也就是說 **NoAug 與 WithAug_1 的混淆矩陣都已經被 WithAug_2 蓋掉，救不回來了**（`.pth` 和 `Performance_*.txt` 因為路徑有分模式，都還在）。
 
 ## 改法
-三分類（[L1373](M5_DataAug.py#L1373)）與二分類（[L1915](M5_DataAug.py#L1915)）兩處都改成：
+三分類（[L1398](M5_DataAug.py#L1398)）與二分類（[L1940](M5_DataAug.py#L1940)）兩處都改成：
 
 ```python
 output_excel = os.path.join(basepath,"perf_Matrix",model_subdir,uuid+"_Performance_Matrix.xlsx")
@@ -809,7 +809,7 @@ python compare_results.py --no-plot
 ## 實作時處理掉的三個陷阱
 
 **1. 佔位檔會被誤當成 0 分成績。**
-M5 在訓練開始前就會先寫一份全 0 的 `Performance_*.txt`（[L761 起](M5_DataAug.py#L761)），等訓練跑完才覆蓋。第一次跑腳本時 WithAug_3 的 2215 正在訓練中，那份全 0 的佔位檔被當成真實成績，把該模式的平均從 21.11 拉到 10.55。現在用 `is_placeholder()` 判斷：**四個主指標全為 0 且所有 TP/FP/FN/TN 也全為 0** 才算佔位檔，排除不計並在開頭列出。注意判準必須包含 TP/FP/FN/TN，否則會誤殺「真的考 0 分但有預測計數」的結果。
+M5 在訓練開始前就會先寫一份全 0 的 `Performance_*.txt`（[L786 起](M5_DataAug.py#L786)），等訓練跑完才覆蓋。第一次跑腳本時 WithAug_3 的 2215 正在訓練中，那份全 0 的佔位檔被當成真實成績，把該模式的平均從 21.11 拉到 10.55。現在用 `is_placeholder()` 判斷：**四個主指標全為 0 且所有 TP/FP/FN/TN 也全為 0** 才算佔位檔，排除不計並在開頭列出。注意判準必須包含 TP/FP/FN/TN，否則會誤殺「真的考 0 分但有預測計數」的結果。
 
 **2. 各模式涵蓋的 uuid 數不同時，MEAN 不可比。**
 訓練還在跑的時候，WithAug_3 只有 1 個 uuid、其他模式有 5 個，直接把兩者的平均並列會嚴重誤導。現在 MEAN 每列都附 `n=`，而且只要發現涵蓋範圍不一致，就會印出警告並**另外用「所有模式都有的 uuid」重算一組可比較的平均**。
@@ -821,7 +821,7 @@ M5 寫佔位檔時有一行漏了 `\n`，輸出會變成 `----------------------
 用 dataviz reference palette 的 categorical slot 1~3（blue `#2a78d6` / orange `#eb6834` / aqua `#1baf7a`），順序固定不循環。該文件已載明這三個 slot 通過 all-pairs 驗證（light：CVD ΔE 9.2、normal-vision 24.0）。環境沒有 `node`，無法重跑驗證器，屬於「沿用已驗證調色盤」的情況。aqua 在淺色底下對比低於 3:1，適用 relief rule —— 腳本同時輸出 terminal 表格與 CSV，table view 存在。模式數超過 8 個時腳本會**拒絕畫圖**並提示改用分面，而不是自動生成新顏色。
 
 ## AUG_* 開關被移到 `__main__`，有個副作用
-開關原本加在檔案開頭（模組層級），後來被移進 `if __name__ == "__main__":`（[L2025 起](M5_DataAug.py#L2025)），跟 `model_subdir`／`augment` 放在一起——就設定集中度來說更好找。
+開關原本加在檔案開頭（模組層級），後來被移進 `if __name__ == "__main__":`（[L2051 起](M5_DataAug.py#L2051)），跟 `model_subdir`／`augment` 放在一起——就設定集中度來說更好找。
 
 `if` 不建立新作用域，所以 **`python M5_DataAug.py` 直接執行完全正常**，這是目前的用法。但要注意：
 
@@ -845,3 +845,98 @@ M5 寫佔位檔時有一行漏了 `\n`，輸出會變成 `----------------------
 
 ## 尚未驗證
 `compare_results.py` 的 `--source historic` 分支還沒在「同一模式跑過多次」的情況下驗證過（目前每個模式都只有一份 `Performance_*.txt`，historic 與 latest 結果相同）。
+
+# 2026/09/11 增強方法排序評估，並實作同類別 mixup
+
+## 評估了哪些方向
+候選：生成式（GAN / VAE / Diffusion）、生理模型模擬、混合類（Mixing-based）、心跳層級（Beat-level）、對比學習式、特徵層級重取樣、自動化增強策略搜尋。
+
+排序以兩個硬限制為準：
+
+1. **`augment_signal(self, signal)` 只拿得到單一訊號** —— 沒有標籤、沒有其他樣本、沒有資料集統計量。「加一段程式」能做的只有「單一 150 點訊號 → 單一 150 點訊號」的轉換。
+2. **標籤編碼在時間間期與振幅比例上**（前面幾節已證明）。會改動這兩者的方法就是在抹掉標籤。
+
+另外確認：增強只透過 `ECGDatasetSubset`（train 專用）發生，`ECGDataset` 永遠是 `augment=False`，所以改動範圍可以只限於前者。
+
+## 排序結果
+
+| 排序 | 方法 | 判斷 |
+|---|---|---|
+| 1 | **混合類（同類別 mixup）** | 唯一真正符合「加一段程式」的，實測效率最高 → **這次實作** |
+| 2 | 心跳層級 bootstrap | 品質最高，但要改資料處理管線並重跑 parsing，不是最小更動 |
+| 3 | 特徵層級重取樣（SMOTE 類） | 訊號空間裡 SMOTE ≈ 用 k-NN 挑夥伴的同類別 mixup，是 #1 的變體而非獨立項目；且不平衡已有 `BalancedBatchSampler` 處理 |
+| 4 | 生理模型模擬 | 沒有經驗證的模型能把血糖值映射到 ECG 形態參數，合成樣本的標籤是假設而非資料 |
+| 5 | 對比學習式 | 雞生蛋：它需要一組「保標籤的增強」來產生正樣本對，而那正是這裡在回答的問題 |
+| 6 | 生成式 GAN/VAE/Diffusion | 每個 uuid 僅約 800–3700 筆平均心跳，易 mode collapse；且無法驗證生成樣本保有類別特徵的 R-T 間期 |
+| 7 | 自動化策略搜尋 | 一輪訓練約 20 分鐘 × 10 uuid，搜 20 組策略就是好幾天 GPU，先驗經驗也不足 |
+
+## 實測數據（沿用前面的效率指標）
+
+| 方法 | λ 範圍 | 多樣性 | 標籤損失 | 效率 |
+|---|---|---|---|---|
+| **同類別 mixup** | [0.5, 1] | 9.5% | **−12.7%** | **189** |
+| 同類別 mixup | [0.6, 1] | 7.5% | −10.9% | 151 |
+| 跨類別 mixup（硬標籤）| [0.6, 1] | 8.3% | 23.4% | 0.4 |
+| （對照）頻域平滑幅度 | ±40% | 10.1% | 1.1% | 9.6 |
+
+標籤損失是**負的** —— 平均兩個同類樣本等於降噪，類別特徵反而更乾淨。
+
+**跨類別 mixup 直接淘汰**：效率 0.4，而且訓練用硬標籤（`target.view(-1).long()` + FocalLoss），要吃軟標籤得連損失函數一起改。
+
+**代價（必須記住）**：mixup 後類別內變異只剩原本的 **80%**（10 組 uuid×類別實測，−16% 到 −26%）。訓練資料會比測試資料乾淨，這是往**錯誤方向**的分布位移 —— 模型見到的雜訊比它實際要面對的少。這也是為什麼心跳層級 bootstrap 在原理上更好：**bootstrap 是把變異往上加，mixup 是往下減**。
+
+## 實作（4 處，都在既有結構內）
+
+| 位置 | 改動 |
+|---|---|
+| [L100](M5_DataAug.py#L100) | `augment_signal` 簽章加 `mix_pool=None, all_signals=None`，`ECGDataset` 原本的呼叫不受影響 |
+| [L140](M5_DataAug.py#L140) | mixup 區塊 |
+| [L240](M5_DataAug.py#L240) | `ECGDatasetSubset.__init__` 建 `class_pool`（只在 `augment=True` 時建） |
+| [L257](M5_DataAug.py#L257) | `__getitem__` 傳入該筆標籤對應的池 |
+
+開關（沿用 `__main__` 那組）：`AUG_SAME_CLASS_MIXUP = True`（[L2056](M5_DataAug.py#L2056)）、`MIXUP_LAMBDA_MIN = 0.5`（[L2064](M5_DataAug.py#L2064)）。
+
+**`class_pool` 只收 `self.indices`**，也就是這個 subset 自己的索引。這點是關鍵：從整個 dataset 抽會把 valid 資料透過 augmentation 洩漏進訓練。
+
+## 驗證
+- **無 valid 洩漏**：`池 ⊆ train 索引 = True`、`池 ∩ valid 索引 = 0`（用真正的 9:1 切分測；第一版測試因為 `idx[:3000]` 超過資料集大小 1317 筆，valid 是空的，結論無效，已重測）
+- **混合行為精確驗證**：把池限制成單一已知索引，再從輸出反解 λ —— 精確重建 148/148 成功，反解的 λ 落在 [0.505, 0.997]，符合設定的 [0.5, 1]
+- 標籤不變、shape/dtype 不變、混合比例 51%（機率 0.5）、關掉開關後訊號完全不變、DataLoader 正常
+
+## 這次的執行設定
+`AUG_FREQ_MAGNITUDE` 改回 `False`，讓 mixup 單獨測；`model_subdir` 改成 **`WithAug_4`**（原本還留著 `WithAug_3`，直接執行會蓋掉剛跑完的那輪）。
+
+## 四輪結果（WithAug_3 已跑完，n=5）
+
+三分類：
+
+| 模式 | Sens | Spec | F1 | Acc |
+|---|---|---|---|---|
+| NoAug | 52.87 | 66.78 | 58.45 | 55.47 |
+| WithAug_1 | **61.80** | **74.09** | **66.77** | 61.26 |
+| WithAug_2 | 61.47 | 73.86 | 66.46 | **61.70** |
+| WithAug_3（純頻域）| 52.56 | 66.60 | 58.11 | 56.40 |
+
+**重要發現：WithAug_3（只開頻域擾動）在三分類上幾乎等於 NoAug**，而 WithAug_1/2（原本三種時域增強全開）明顯較好。
+
+這印證了先前就寫過的限制：**離線效率指標只能篩掉有害的方法，不能保證有效**。頻域擾動「不傷標籤」是對的（標籤損失 1.1%），但不傷標籤 ≠ 有幫助。同理，mixup 的效率 189 也不保證它會贏，仍要看 WithAug_4 的實際結果。
+
+二分類則是 WithAug_3 的 F1 最高（74.81），互有得失。
+
+## 順手修掉 compare_results.py 的 CSV 問題
+原本輸出一份合併的 `comparison.csv`，二分類看起來「沒有被收錄」。實際上資料都在（各 20 列），但有兩個問題疊在一起：
+
+1. **排序**：依 classes 字串排序時 `'ThreeClasses' < 'TwoClasses'`，二分類整批被推到檔案後半，從頭看就像不存在。
+2. **欄位參差**：兩種分類欄位本來就不同（二分類只有 `TP/FP/FN/TN`，三分類是 `*_High/_Low/_Normal`），合併後二分類每列有 16 個空欄、三分類有 4 個。
+
+改成**每個分類各一份**，檔名跟 PNG 一致，且只收該分類真正有值的欄位：
+
+```
+comparison_TwoClasses.csv     20 列, 14 欄, 無全空欄位
+comparison_ThreeClasses.csv   20 列, 26 欄, 無全空欄位
+```
+
+舊的合併檔會在執行時自動移除，避免跟新檔混淆。
+
+## 尚未驗證
+WithAug_4（只開 mixup）還沒開始跑。
