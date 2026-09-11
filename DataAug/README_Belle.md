@@ -404,10 +404,10 @@ for i in range(0,len(user_information)):
 
 | 參數 | 原本（三分類 / 二分類） | 改成 | 位置 |
 |---|---|---|---|
-| 訓練輪數 | 20 / 20 | **5** | [L883](M5_DataAug.py#L883)、[L1528](M5_DataAug.py#L1528) |
-| Epoch 上限 | 800 / 800 | **300** | [L779](M5_DataAug.py#L779)、[L1420](M5_DataAug.py#L1420) |
-| Early-stop patience | 50 / **100** | **30** | [L780](M5_DataAug.py#L780)、[L1421](M5_DataAug.py#L1421) |
-| Scheduler patience | 50 / 100 | **15** | [L916](M5_DataAug.py#L916)、[L1564](M5_DataAug.py#L1564) |
+| 訓練輪數 | 20 / 20 | **5** | [L912](M5_DataAug.py#L912)、[L1557](M5_DataAug.py#L1557) |
+| Epoch 上限 | 800 / 800 | **300** | [L808](M5_DataAug.py#L808)、[L1449](M5_DataAug.py#L1449) |
+| Early-stop patience | 50 / **100** | **30** | [L809](M5_DataAug.py#L809)、[L1450](M5_DataAug.py#L1450) |
+| Scheduler patience | 50 / 100 | **15** | [L945](M5_DataAug.py#L945)、[L1593](M5_DataAug.py#L1593) |
 
 預估降到每個 uuid 約 20～25 分鐘、10 個 uuid 約 3.5～4 小時，NoAug＋WithAug 兩邊合計約 7～8 小時。
 
@@ -418,12 +418,12 @@ for i in range(0,len(user_information)):
 2. **scheduler patience 拆成獨立變數 `scheduler_patience`**：三分類原本是 `ReduceLROnPlateau(..., patience=patience)`，直接複用 early-stop 的 `patience`；兩者相等時 LR 永遠不會衰減就先被 early stop 停掉，`ReduceLROnPlateau` 等於白設。現在 `scheduler_patience=15` < `patience=30`，LR 至少有一次衰減的機會。
 
 ## 這次沒有改的東西
-`ReduceLROnPlateau(..., verbose=1, ...)` 保留不動。前面 2026/09/08 那節提到這個參數在 PyTorch 2.8 會丟 `TypeError`，但這台機器（H100 80GB HBM3）的環境是 **torch 2.5.1+cu121**，`verbose` 還在（只是 deprecated），不會炸。如果之後換到 2.8 以上的環境跑 M5，這兩處（[L916](M5_DataAug.py#L916)、[L1564](M5_DataAug.py#L1564)）要比照 Model_Builder_Predictor_Belle.py 拿掉 `verbose`。
+`ReduceLROnPlateau(..., verbose=1, ...)` 保留不動。前面 2026/09/08 那節提到這個參數在 PyTorch 2.8 會丟 `TypeError`，但這台機器（H100 80GB HBM3）的環境是 **torch 2.5.1+cu121**，`verbose` 還在（只是 deprecated），不會炸。如果之後換到 2.8 以上的環境跑 M5，這兩處（[L945](M5_DataAug.py#L945)、[L1593](M5_DataAug.py#L1593)）要比照 Model_Builder_Predictor_Belle.py 拿掉 `verbose`。
 
 ## 怎麼確認訓練真的在 GPU 上
 容器環境裡 `nvidia-smi` 下方的 Processes 表格會是空的（PID namespace 隔離，查詢會顯示 `[Not Found]`），**不能**因為那張表沒列出 process 就以為沒用到 GPU。可靠的確認方式：
 
-1. 看程式自己印的 log（[L888-896](M5_DataAug.py#L888-L896)、[L1534-1542](M5_DataAug.py#L1534-L1542)）每輪開頭會印 `cuda:0`、`GPU Count: 1`、`NVIDIA H100 80GB HBM3`；掉回 CPU 會印 `cpu` 且沒有裝置名稱。
+1. 看程式自己印的 log（[L917-925](M5_DataAug.py#L917-L925)、[L1563-1571](M5_DataAug.py#L1563-L1571)）每輪開頭會印 `cuda:0`、`GPU Count: 1`、`NVIDIA H100 80GB HBM3`；掉回 CPU 會印 `cpu` 且沒有裝置名稱。
 2. `ls -l /proc/$(pgrep -f M5_DataAug)/fd | grep nvidia` 看 process 有沒有開 `/dev/nvidiaN`（`nvidia-smi -q | grep -i "minor number"` 可以對應是哪張卡）。
 3. `nvidia-smi` 看 GPU-Util／Memory-Usage 有沒有在動。
 
@@ -472,8 +472,8 @@ cd /share/Belle/DataAug && python M5_DataAug.py 2>&1 | tee train_noaug_$(date +%
 
 | 檔案 | 位置 | tag |
 |---|---|---|
-| M5_DataAug.py | [L1026](M5_DataAug.py#L1026) | ThreeClasses |
-| M5_DataAug.py | [L1652](M5_DataAug.py#L1652) | TwoClasses |
+| M5_DataAug.py | [L1055](M5_DataAug.py#L1055) | ThreeClasses |
+| M5_DataAug.py | [L1681](M5_DataAug.py#L1681) | TwoClasses |
 | Model_Builder_Predictor_Belle.py | [L1625](Model_Builder_Predictor_Belle.py#L1625) | ThreeClasses |
 | Model_Builder_Predictor_Belle.py | [L2037](Model_Builder_Predictor_Belle.py#L2037) | TwoClasses |
 
@@ -492,7 +492,7 @@ if Epoch_range[0] == 0:
 
 `Loss_list` / `ACCs` 的初始化被包在「從第 0 個 epoch 開始」的守衛裡，但迴圈內的 `Loss_list.append(...)` 是無條件執行的。只要用非零的 `Epoch_range` 續訓，第一個 epoch 就會 `NameError: name 'Loss_list' is not defined`。
 
-已把兩行初始化移到 `if` 外面（[M5 L900](M5_DataAug.py#L900)、[M5 L1545](M5_DataAug.py#L1545)、[MBP L1507](Model_Builder_Predictor_Belle.py#L1507)、[MBP L1926](Model_Builder_Predictor_Belle.py#L1926)），建立模型那段仍然留在守衛內。目前的 `__main__` 都是從 0 開始跑，所以這個 bug 還沒被踩到，但新加的記錄功能會用到續訓路徑，先修掉。
+已把兩行初始化移到 `if` 外面（[M5 L929](M5_DataAug.py#L929)、[M5 L1574](M5_DataAug.py#L1574)、[MBP L1507](Model_Builder_Predictor_Belle.py#L1507)、[MBP L1926](Model_Builder_Predictor_Belle.py#L1926)），建立模型那段仍然留在守衛內。目前的 `__main__` 都是從 0 開始跑，所以這個 bug 還沒被踩到，但新加的記錄功能會用到續訓路徑，先修掉。
 
 ## 驗證
 - `save_training_history()` 單獨測過：一般情況、續訓合併（epoch 1–3 存檔後再存 4–5，CSV 正確接成 1–5）、混入 torch tensor 的 accuracy、空 list 回傳 `(None, None)` 不炸，PNG 有實際開起來看過。
@@ -537,7 +537,7 @@ signal = torch.roll(signal, shifts=shift, dims=-1)
 3. 截掉邊緣 5 點的代價實測過，是可以接受的：頭尾 5 點偏離基線只有 0.058 / 0.045，對照 QRS 峰值偏離基線 0.816，**截掉的純粹是基線，沒有波形資訊**。T 波峰在 idx 110–120，離邊界很遠。
 
 ## 改法
-[M5_DataAug.py L109](M5_DataAug.py#L109)、[Model_Builder_Predictor_Belle.py L866](Model_Builder_Predictor_Belle.py#L866)（兩個檔案是同一份重複的 `augment_signal`，一起改）：
+[M5_DataAug.py L123](M5_DataAug.py#L123)、[Model_Builder_Predictor_Belle.py L866](Model_Builder_Predictor_Belle.py#L866)（兩個檔案是同一份重複的 `augment_signal`，一起改）：
 
 ```python
 shift = int(torch.randint(-5, 6, (1,)).item())
@@ -570,3 +570,140 @@ if shift != 0:
 
 ## 尚未驗證
 改完還沒在真實訓練中跑過。
+
+# 2026/09/11 評估 Time Warping：結論是不要做（只做分析，未改程式）
+
+## 問題
+考慮在 `augment_signal` 加入 Time Warping（時間軸局部拉伸／壓縮但保持波形形狀），疑慮是會不會破壞波形。
+
+## 結論：不要做，但風險不是「破壞波形」
+插值後波形形狀其實保留得很好。真正的問題嚴重得多：**time warping 擾動的正是帶有標籤資訊的量，等於把標籤本身抹掉。**
+
+## 證據一：時間軸資訊就是判別依據
+量測每個 uuid 各類別的 T 波峰位置（R 峰固定在 idx 50，所以這是 R-T 間期，QT 的代理指標；`fs=250`，1 idx = 4 ms）：
+
+| uuid | High − Normal | Low − Normal |
+|---|---|---|
+| 2197 | −32 ms | — |
+| 2199 | −12 ms | — |
+| 2204 | −32 ms | — |
+| 2206 | −20 ms | — |
+| 2208 | −12 ms | −16 ms |
+| 2210 | −8 ms | +4 ms |
+| 2215 | −24 ms | **+20 ms** |
+| 2216 | −28 ms | **+56 ms** |
+| 2223 | −24 ms | −8 ms |
+| 2249 | −24 ms | — |
+
+**High 相對 Normal 的 T 波提前，10/10 個 uuid 方向一致**，且類別內 IQR 只有 2–12 idx，比類別間差距還小 —— 是個乾淨、跨受試者一致的特徵。Low 那邊 2215／2216 出現 +20／+56 ms 的延後，方向符合**低血糖造成 QT 延長**這個已知生理現象。
+
+## 證據二：模擬 warp 對可分性的破壞
+以「T 波峰位置」單一特徵區分 Normal vs High 的 AUC（warp 保持 R 峰不動、長度仍 150）：
+
+| | 無 warp | ±5% | ±10% | ±20% |
+|---|---|---|---|---|
+| 10 個 uuid 平均 AUC | **0.813** | 0.787 | 0.751 | 0.660 |
+
+±20% 吃掉約一半可用的類別可分性（0.313 → 0.160）。
+
+原因很直觀：±10% 的 warp 讓 T 峰移動 ±(120−50)×0.10 ≈ **±7 idx ≈ ±28 ms**，而 High 對 Normal 的整體差距只有 8–32 ms。**擾動幅度跟訊號本身同量級。**
+
+## 為什麼現有的 ±5 點平移沒有這個問題
+這是關鍵對比：
+
+- **平移是剛性的**：整個視窗一起移動，R-T 間期、QRS 寬度、所有時間間隔完全不變。改變的只是波形在視窗裡的絕對位置，而那本來就不該是判別依據。
+- **warp 改變間期本身**：它擾動的正是帶有標籤資訊的量。
+
+同理，現有的**全域振幅縮放也是安全的**：訊號已 min-max 正規化（R 峰 = 1.0），全域乘 0.9~1.1 保持所有比例不變，T/R 振幅比原封不動。
+
+順帶量了 T 波振幅，High 比 Normal 低（9/10 個 uuid），代表**振幅同樣編碼了標籤** —— 所以也**不要加「只縮放某一段」的振幅增強**，那會跟 warp 犯一樣的錯。
+
+## 一條更好的增強方向（尚未實作）
+真正的限制是資料量。[Data_Parsing_Belle.py L407-412](Data_Parsing_Belle.py#L407-L412) 顯示每個 .txt 是一段 10 秒 ECG 裡所有心跳平均後的 mean wave（跳過第一拍和最後一拍）。10 秒在 250 Hz 下約有 10–17 拍。
+
+可以**對這些心跳做 bootstrap：每次隨機抽一個子集（例如 70%）去平均，產生多個不同的 mean wave**。這樣得到的是真實、生理上正確、標籤完全正確的新樣本，沒有任何合成失真。代價是要動資料處理管線並重跑 parsing。
+
+## 給之後的判準
+這份資料的標籤同時編碼在**時間間期**和**振幅比例**上。任何新增的 augmentation 都要先問一句：**它會不會改動這兩者？** 會的話就是在抹掉標籤，不管它在一般 ECG 任務上多標準。
+
+# 2026/09/11 加入頻域平滑幅度擾動，並改用開關單獨測試（只改 M5_DataAug.py）
+
+## 問題
+承上一節：time warping 不能用，因為它擾動的是帶標籤資訊的時間間期。那**把訊號轉到頻域加擾動再轉回時域**可行嗎？
+
+## 可行，但只有一種變體能用
+把幾種做法放在同一個尺度上比 —— **換到多少多樣性（RMS 變化）vs 賠掉多少標籤（T 峰位置的 Normal/High 可分性 AUC 損失）**：
+
+| 方法 | 參數 | 多樣性 | 標籤損失 | 效率 |
+|---|---|---|---|---|
+| **頻域 平滑幅度包絡** | ±40% | 10.1% | **1.1%** | **9.6** |
+| **頻域 平滑幅度包絡** | ±60% | 15.3% | **1.1%** | **14.2** |
+| 頻域 per-bin 幅度 | ±40% | 12.5% | 21.7% | 0.6 |
+| 頻域 相位 | ±0.4 rad | 12.5% | 26.4% | 0.5 |
+| 時域 高斯雜訊（現有） | std 0.02 | 6.7% | 12.6% | 0.5 |
+| 時域 time warp | ±10% | 9.5% | 24.2% | 0.4 |
+
+**平滑幅度包絡的效率比其他所有方法高 15~25 倍。** 其餘全部落在 0.4~0.6，等於「加多少多樣性就賠掉多少標籤」。
+
+## 為什麼差這麼多
+關鍵：**相位攜帶時間資訊，而時間資訊就是標籤**（上一節已證明 T 波間期是判別依據）。
+
+- **相位擾動**：直接攻擊時序，跟 time warping 同一類錯誤。
+- **per-bin 隨機幅度**：雖然沒碰相位，但用白雜訊乘頻譜＝時域跟隨機 kernel 卷積，產生 ringing 把波峰位置抹糊，**間接**破壞時序。
+- **平滑幅度包絡**：緩慢變化的頻譜傾斜，時域上等同輕微的濾波器響應變化 —— 正是不同電極接觸、皮膚阻抗、裝置差異造成的真實變異。生理上合理且完全不動相位。
+
+另一個好處：前處理已做過 `nk.ecg_clean` 和 `baseline_remove`，平滑包絡不會引入頻帶外內容；而高斯白雜訊會加入前處理本來會濾掉的高頻，造成訓練與推論的分布落差。
+
+## 頻譜結構（150 點 @ 250 Hz）
+rfft 只有 76 個 bin，解析度 1.67 Hz。能量分布：0–5 Hz 佔 23.5%、5–10 Hz 佔 20.9%、10–20 Hz 佔 31.3%、20–40 Hz 佔 19.9%，**40 Hz 以上只剩 4.4%**。所以「只擾動高頻」這種保守做法幾乎不會產生任何多樣性，沒有意義。
+
+## 實作：改用開關，這次只測頻域
+為了單獨測試頻域擾動，**沒有把舊的增強註解掉，改成在檔案開頭加開關**（[L57-64](M5_DataAug.py#L57-L64)），之後要評估組合時只要改這幾個值，不必再動 `augment_signal`：
+
+```python
+AUG_GAUSSIAN_NOISE   = False   ##加高斯雜訊
+AUG_AMPLITUDE_SCALE  = False   ##振幅隨機縮放 0.9~1.1 倍
+AUG_TIME_SHIFT       = False   ##時間軸剛性平移(邊緣補值)
+AUG_FREQ_MAGNITUDE   = True    ##頻域平滑幅度擾動(只動幅度包絡，相位不動)
+
+FREQ_AUG_AMPLITUDE   = 0.4     ##增益包絡的擾動幅度(±40%)
+FREQ_AUG_CONTROL_PTS = 5       ##控制點數，越少包絡越平滑、越不易產生 ringing
+```
+
+新增的擾動在 [L138](M5_DataAug.py#L138)：
+
+```python
+sig_len = signal.shape[-1]
+spec = torch.fft.rfft(signal, dim=-1)
+ctrl = 1.0 + (torch.rand(FREQ_AUG_CONTROL_PTS, device=signal.device) - 0.5) * 2 * FREQ_AUG_AMPLITUDE
+gain = F.interpolate(ctrl.view(1, 1, -1), size=spec.shape[-1],
+                     mode='linear', align_corners=True).view(-1).clone()
+gain[0] = 1.0   ###DC 不動，避免整體基線飄移
+signal = torch.fft.irfft(spec * gain, n=sig_len, dim=-1)
+```
+
+**踩到的坑**：頻譜變數不能命名為 `F` —— 本檔開頭已經有 `import torch.nn.functional as F`（[L25](M5_DataAug.py#L25)），命名成 `F` 會在函式內遮蔽掉這個模組，讓下一行的 `F.interpolate` 直接壞掉。所以用 `spec`。
+
+## 驗證（透過真正的 `ECGDataset` 端對端跑過）
+用 uuid 2197 的 Train 資料（3713 筆，`method='time'`, `classes=2`, `augment=True`）：
+
+- 實際被增強的比例 51%（開關機率 0.5，符合預期）
+- 輸出 shape `(1,150)`、dtype float32 不變，無 NaN/Inf
+- RMS 變化中位數 **7.9%**（有效的多樣性）
+- **R 峰位置 100% 完全不變**
+- **T 峰位移 ≤1 idx 的比例 98.0%**（標籤資訊保住了）
+- 四個開關全部關掉時，訊號完全不變（確認開關真的有效）
+- `DataLoader` 走一遍正常，batch `(32, 1, 150)`
+
+## 三個要注意的限制
+1. **現有的高斯雜訊效率是 0.5，跟 time warping 同一級。** 但這不代表它沒用 —— 雜訊除了多樣性還有抗噪穩健性的價值，那不會反映在這個指標上。所以是**新增**頻域擾動，不是拿它替換雜訊。
+2. **「標籤損失」只量了 T 峰位置這一個特徵。** 它確實有判別力（基準 AUC 0.80），但模型可能還用了別的特徵。保護它是必要條件，不是充分條件。
+3. **「多樣性」用 RMS 變化衡量對剛性平移不公平** —— 平移會產生很大的逐點差異但波形沒變，所以剛性平移的效率數字是被高估的，不要拿它跟頻域方法直接比。
+
+**效率排序不等於準確率會提升**，最終仍需實際訓練驗證。
+
+## 這次只改了 M5_DataAug.py
+`Model_Builder_Predictor_Belle.py` 的 `augment_signal`（[L866](Model_Builder_Predictor_Belle.py#L866)）**沒有跟著改**，仍是原本三種時域增強、且沒有開關。兩個檔案的 augmentation 邏輯從這次開始分岔了，之後如果要讓 MBP 跟上，記得一併移植開關與頻域區塊。
+
+## 尚未驗證
+還沒實際訓練過。下次跑的時候這一版等於「只有頻域擾動」的 WithAug，可以直接跟 NoAug 比。

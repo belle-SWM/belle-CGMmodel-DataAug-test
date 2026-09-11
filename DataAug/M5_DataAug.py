@@ -51,6 +51,19 @@ def get_version(): ###取得版本號
     return '007'
 
 
+###──── Data Augmentation 開關 ──────────────────────────────────────────
+###這次要單獨測試「頻域平滑幅度擾動」的效果，所以先把原本三種時域增強關掉。
+###用開關而不是註解掉：之後要評估綜合方式時只要改這幾個值，不必再動 augment_signal。
+AUG_GAUSSIAN_NOISE   = False   ##加高斯雜訊
+AUG_AMPLITUDE_SCALE  = False   ##振幅隨機縮放 0.9~1.1 倍
+AUG_TIME_SHIFT       = False   ##時間軸剛性平移(邊緣補值)
+AUG_FREQ_MAGNITUDE   = True    ##頻域平滑幅度擾動(只動幅度包絡，相位不動)
+
+###頻域擾動的參數
+FREQ_AUG_AMPLITUDE   = 0.4     ##增益包絡的擾動幅度(±40%)
+FREQ_AUG_CONTROL_PTS = 5       ##控制點數，越少包絡越平滑、越不易產生 ringing
+
+
 class ECGDataset(Dataset):
     def __init__(self, dir_path, method='raw', classes=3, augment=False):
         self.dir_path = os.path.abspath(dir_path)
@@ -96,17 +109,18 @@ class ECGDataset(Dataset):
     def __len__(self):
         return len(self.Labels)
 
-    # 對已完成特徵轉換的訊號做輕量資料增強：加雜訊、振幅縮放、時間平移(只用於training data)
+    # 對已完成特徵轉換的訊號做輕量資料增強(只用於training data)
+    # 每一種增強由檔案開頭的 AUG_* 開關控制，方便單獨測試或之後評估組合
     def augment_signal(self, signal):
-        if torch.rand(1).item() < 0.5:  ##加高斯雜訊
+        if AUG_GAUSSIAN_NOISE and torch.rand(1).item() < 0.5:  ##加高斯雜訊
             noise_std = 0.02
             signal = signal + torch.randn_like(signal) * noise_std
 
-        if torch.rand(1).item() < 0.5:  ##振幅隨機縮放0.9~1.1倍
+        if AUG_AMPLITUDE_SCALE and torch.rand(1).item() < 0.5:  ##振幅隨機縮放0.9~1.1倍
             scale = 1.0 + (torch.rand(1).item() - 0.5) * 0.2
             signal = signal * scale
 
-        if torch.rand(1).item() < 0.5:  ##時間軸小幅平移
+        if AUG_TIME_SHIFT and torch.rand(1).item() < 0.5:  ##時間軸小幅平移
             ###不用 torch.roll：roll 是循環的，被推出一端的取樣點會從另一端繞回來，
             ###在訊號中間接出一個真實 ECG 不會出現的跳階。改成邊緣補值(replicate)：
             ###平移後空出來的那幾點用最靠近的邊緣值填，另一端多出來的直接截掉。
@@ -120,6 +134,21 @@ class ECGDataset(Dataset):
                 else:           ###往左移，右端用最後一點補、截掉開頭
                     signal = torch.cat([signal[..., pad:],
                                         signal[..., -1:].expand(*signal.shape[:-1], pad)], dim=-1)
+
+        if AUG_FREQ_MAGNITUDE and torch.rand(1).item() < 0.5:  ##頻域平滑幅度擾動
+            ###只擾動頻譜的「幅度包絡」，相位完全不動。相位攜帶時間資訊(T波位置、R-T間期)，
+            ###而那正是判別血糖的依據(High 的 T 波比 Normal 提前 8~32ms，10/10 個 uuid 一致)，
+            ###動了相位等於把標籤本身抹掉，跟 time warping 是同一類錯誤。
+            ###包絡用少數控制點內插成平滑曲線：per-bin 亂數等於在時域跟隨機 kernel 卷積，
+            ###會產生 ringing 把波峰位置抹糊，間接破壞時序(實測效率只有平滑包絡的 1/15)。
+            ###注意這裡不能把頻譜命名為 F，F 在本檔開頭已經是 torch.nn.functional。
+            sig_len = signal.shape[-1]
+            spec = torch.fft.rfft(signal, dim=-1)
+            ctrl = 1.0 + (torch.rand(FREQ_AUG_CONTROL_PTS, device=signal.device) - 0.5) * 2 * FREQ_AUG_AMPLITUDE
+            gain = F.interpolate(ctrl.view(1, 1, -1), size=spec.shape[-1],
+                                 mode='linear', align_corners=True).view(-1).clone()
+            gain[0] = 1.0   ###DC 不動，避免整體基線飄移
+            signal = torch.fft.irfft(spec * gain, n=sig_len, dim=-1)
 
         return signal
 
@@ -1992,7 +2021,7 @@ if __name__ == "__main__":
          
     target_uuids=['2197','2199','2204','2206','2208','2210','2215','2216','2223','2249']  ###這次要訓練的uuid(Model/70_30/GlucoseData/<uuid>底下已有Train/Test資料)
 
-    model_subdir="WithAug_1"   ###無augmentation版本，輸出到Model/70_30/NoAug底下；要跑有augmentation版本請改成"WithAug"並把augment改成True，否則會覆蓋掉這次的結果
+    model_subdir="WithAug_2"   ###無augmentation版本，輸出到Model/70_30/NoAug底下；要跑有augmentation版本請改成"WithAug"並把augment改成True，否則會覆蓋掉這次的結果
     augment=True
 
     for i in range(0,len(user_information)):
