@@ -2042,16 +2042,18 @@ if __name__ == "__main__":
          
     target_uuids=['2197','2199','2204','2206','2208','2210','2215','2216','2223','2249']  ###這次要訓練的uuid(Model/70_30/GlucoseData/<uuid>底下已有Train/Test資料)
 
-    model_subdir="WithAug_4"   ###每跑一種新的增強組合就換一個編號，否則會覆蓋掉上一輪的結果
+    model_subdir="WithAug_5"   ###每跑一種新的增強組合就換一個編號，否則會覆蓋掉上一輪的結果
     augment=True
     ###──── Data Augmentation 開關 ──────────────────────────────────────────
-    ###一次只開一種來單獨評估，跑完換一個 model_subdir 編號，最後再評估綜合組合。
-    ###已單獨測過：WithAug_3 = 只開 AUG_FREQ_MAGNITUDE。
-    ###這次(WithAug_4) = 只開 AUG_SAME_CLASS_MIXUP。
-    AUG_GAUSSIAN_NOISE   = False   ##加高斯雜訊
-    AUG_AMPLITUDE_SCALE  = False   ##振幅隨機縮放 0.9~1.1 倍
-    AUG_TIME_SHIFT       = False   ##時間軸剛性平移(邊緣補值)
-    AUG_FREQ_MAGNITUDE   = False   ##頻域平滑幅度擾動(只動幅度包絡，相位不動) -- WithAug_3 已單獨測過
+    ###跑完一種組合就換一個 model_subdir 編號，否則會覆蓋掉上一輪。
+    ###已測過：WithAug_1/2 = trio(noise+amp+shift)；WithAug_3 = 只開頻域；WithAug_4 = 只開 mixup。
+    ###這次(WithAug_5) = trio + mixup。理由：三分類上這兩者都是 5/5 全勝(頻域只有 2/5、效果 0)，
+    ###而且強項在不同受試者上(trio 幾乎獨吞 2210 的增益，mixup 在其餘四個較平均)；
+    ###機制上也互補：mixup 會把類別內變異壓到 80%，trio 的高斯雜訊正好把變異加回去。
+    AUG_GAUSSIAN_NOISE   = True    ##加高斯雜訊
+    AUG_AMPLITUDE_SCALE  = True    ##振幅隨機縮放 0.9~1.1 倍(註：conv1 後緊接 BatchNorm，效果會被部分吸收)
+    AUG_TIME_SHIFT       = True    ##時間軸剛性平移(邊緣補值)
+    AUG_FREQ_MAGNITUDE   = False   ##頻域平滑幅度擾動 -- WithAug_3 實測三分類零效果(勝率2/5)，這輪不開
 
     AUG_SAME_CLASS_MIXUP = True    ##同類別 mixup(只跟同類別的另一筆加權平均)
 
