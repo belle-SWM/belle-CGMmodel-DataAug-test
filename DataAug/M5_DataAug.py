@@ -1380,7 +1380,12 @@ def BuildModel_ThreeClasses(uuid,basepath,splitting_ratio="",model_subdir="",aug
     df.loc['Total_Predicted'] = df.sum(axis=0)
 
     # 5. 儲存為 Excel 檔案
-    output_excel = os.path.join(basepath,uuid+"_Performance_Matrix.xlsx")
+    ###改存到 basepath/perf_Matrix/<model_subdir>/ 底下。原本直接寫在 basepath 根目錄，
+    ###路徑不含 splitting_ratio 與 model_subdir，導致 NoAug/WithAug 跑完會互相覆蓋同名檔案
+    ###(實際已經發生過：NoAug 與 WithAug_1 的混淆矩陣都被 WithAug_2 蓋掉了)。
+    ###model_subdir 為空字串時 os.path.join 會自動略過，退回 perf_Matrix/ 根目錄。
+    output_excel = os.path.join(basepath,"perf_Matrix",model_subdir,uuid+"_Performance_Matrix.xlsx")
+    os.makedirs(os.path.dirname(output_excel), exist_ok=True)
     df.to_excel(output_excel, index_label="Reference \ Predicted")
 
     print(f"混淆矩陣已成功導出至: {output_excel}")
@@ -1917,7 +1922,12 @@ def BuildModel_TwoClasses(uuid,basepath,splitting_ratio="",model_subdir="",augme
     df.loc['Total_Predicted'] = df.sum(axis=0)
 
     # 5. 儲存為 Excel 檔案
-    output_excel = os.path.join(basepath,uuid+"_Performance_Matrix.xlsx")
+    ###改存到 basepath/perf_Matrix/<model_subdir>/ 底下。原本直接寫在 basepath 根目錄，
+    ###路徑不含 splitting_ratio 與 model_subdir，導致 NoAug/WithAug 跑完會互相覆蓋同名檔案
+    ###(實際已經發生過：NoAug 與 WithAug_1 的混淆矩陣都被 WithAug_2 蓋掉了)。
+    ###model_subdir 為空字串時 os.path.join 會自動略過，退回 perf_Matrix/ 根目錄。
+    output_excel = os.path.join(basepath,"perf_Matrix",model_subdir,uuid+"_Performance_Matrix.xlsx")
+    os.makedirs(os.path.dirname(output_excel), exist_ok=True)
     df.to_excel(output_excel, index_label="Reference \ Predicted")
 
     print(f"二分類混淆矩陣已成功導出至: {output_excel}")

@@ -404,10 +404,10 @@ for i in range(0,len(user_information)):
 
 | 參數 | 原本（三分類 / 二分類） | 改成 | 位置 |
 |---|---|---|---|
-| 訓練輪數 | 20 / 20 | **5** | [L912](M5_DataAug.py#L912)、[L1557](M5_DataAug.py#L1557) |
-| Epoch 上限 | 800 / 800 | **300** | [L808](M5_DataAug.py#L808)、[L1449](M5_DataAug.py#L1449) |
-| Early-stop patience | 50 / **100** | **30** | [L809](M5_DataAug.py#L809)、[L1450](M5_DataAug.py#L1450) |
-| Scheduler patience | 50 / 100 | **15** | [L945](M5_DataAug.py#L945)、[L1593](M5_DataAug.py#L1593) |
+| 訓練輪數 | 20 / 20 | **5** | [L912](M5_DataAug.py#L912)、[L1562](M5_DataAug.py#L1562) |
+| Epoch 上限 | 800 / 800 | **300** | [L808](M5_DataAug.py#L808)、[L1454](M5_DataAug.py#L1454) |
+| Early-stop patience | 50 / **100** | **30** | [L809](M5_DataAug.py#L809)、[L1455](M5_DataAug.py#L1455) |
+| Scheduler patience | 50 / 100 | **15** | [L945](M5_DataAug.py#L945)、[L1598](M5_DataAug.py#L1598) |
 
 預估降到每個 uuid 約 20～25 分鐘、10 個 uuid 約 3.5～4 小時，NoAug＋WithAug 兩邊合計約 7～8 小時。
 
@@ -418,12 +418,12 @@ for i in range(0,len(user_information)):
 2. **scheduler patience 拆成獨立變數 `scheduler_patience`**：三分類原本是 `ReduceLROnPlateau(..., patience=patience)`，直接複用 early-stop 的 `patience`；兩者相等時 LR 永遠不會衰減就先被 early stop 停掉，`ReduceLROnPlateau` 等於白設。現在 `scheduler_patience=15` < `patience=30`，LR 至少有一次衰減的機會。
 
 ## 這次沒有改的東西
-`ReduceLROnPlateau(..., verbose=1, ...)` 保留不動。前面 2026/09/08 那節提到這個參數在 PyTorch 2.8 會丟 `TypeError`，但這台機器（H100 80GB HBM3）的環境是 **torch 2.5.1+cu121**，`verbose` 還在（只是 deprecated），不會炸。如果之後換到 2.8 以上的環境跑 M5，這兩處（[L945](M5_DataAug.py#L945)、[L1593](M5_DataAug.py#L1593)）要比照 Model_Builder_Predictor_Belle.py 拿掉 `verbose`。
+`ReduceLROnPlateau(..., verbose=1, ...)` 保留不動。前面 2026/09/08 那節提到這個參數在 PyTorch 2.8 會丟 `TypeError`，但這台機器（H100 80GB HBM3）的環境是 **torch 2.5.1+cu121**，`verbose` 還在（只是 deprecated），不會炸。如果之後換到 2.8 以上的環境跑 M5，這兩處（[L945](M5_DataAug.py#L945)、[L1598](M5_DataAug.py#L1598)）要比照 Model_Builder_Predictor_Belle.py 拿掉 `verbose`。
 
 ## 怎麼確認訓練真的在 GPU 上
 容器環境裡 `nvidia-smi` 下方的 Processes 表格會是空的（PID namespace 隔離，查詢會顯示 `[Not Found]`），**不能**因為那張表沒列出 process 就以為沒用到 GPU。可靠的確認方式：
 
-1. 看程式自己印的 log（[L917-925](M5_DataAug.py#L917-L925)、[L1563-1571](M5_DataAug.py#L1563-L1571)）每輪開頭會印 `cuda:0`、`GPU Count: 1`、`NVIDIA H100 80GB HBM3`；掉回 CPU 會印 `cpu` 且沒有裝置名稱。
+1. 看程式自己印的 log（[L917-925](M5_DataAug.py#L917-L925)、[L1568-1576](M5_DataAug.py#L1568-L1576)）每輪開頭會印 `cuda:0`、`GPU Count: 1`、`NVIDIA H100 80GB HBM3`；掉回 CPU 會印 `cpu` 且沒有裝置名稱。
 2. `ls -l /proc/$(pgrep -f M5_DataAug)/fd | grep nvidia` 看 process 有沒有開 `/dev/nvidiaN`（`nvidia-smi -q | grep -i "minor number"` 可以對應是哪張卡）。
 3. `nvidia-smi` 看 GPU-Util／Memory-Usage 有沒有在動。
 
@@ -473,7 +473,7 @@ cd /share/Belle/DataAug && python M5_DataAug.py 2>&1 | tee train_noaug_$(date +%
 | 檔案 | 位置 | tag |
 |---|---|---|
 | M5_DataAug.py | [L1055](M5_DataAug.py#L1055) | ThreeClasses |
-| M5_DataAug.py | [L1681](M5_DataAug.py#L1681) | TwoClasses |
+| M5_DataAug.py | [L1686](M5_DataAug.py#L1686) | TwoClasses |
 | Model_Builder_Predictor_Belle.py | [L1625](Model_Builder_Predictor_Belle.py#L1625) | ThreeClasses |
 | Model_Builder_Predictor_Belle.py | [L2037](Model_Builder_Predictor_Belle.py#L2037) | TwoClasses |
 
@@ -492,7 +492,7 @@ if Epoch_range[0] == 0:
 
 `Loss_list` / `ACCs` 的初始化被包在「從第 0 個 epoch 開始」的守衛裡，但迴圈內的 `Loss_list.append(...)` 是無條件執行的。只要用非零的 `Epoch_range` 續訓，第一個 epoch 就會 `NameError: name 'Loss_list' is not defined`。
 
-已把兩行初始化移到 `if` 外面（[M5 L929](M5_DataAug.py#L929)、[M5 L1574](M5_DataAug.py#L1574)、[MBP L1507](Model_Builder_Predictor_Belle.py#L1507)、[MBP L1926](Model_Builder_Predictor_Belle.py#L1926)），建立模型那段仍然留在守衛內。目前的 `__main__` 都是從 0 開始跑，所以這個 bug 還沒被踩到，但新加的記錄功能會用到續訓路徑，先修掉。
+已把兩行初始化移到 `if` 外面（[M5 L929](M5_DataAug.py#L929)、[M5 L1579](M5_DataAug.py#L1579)、[MBP L1507](Model_Builder_Predictor_Belle.py#L1507)、[MBP L1926](Model_Builder_Predictor_Belle.py#L1926)），建立模型那段仍然留在守衛內。目前的 `__main__` 都是從 0 開始跑，所以這個 bug 還沒被踩到，但新加的記錄功能會用到續訓路徑，先修掉。
 
 ## 驗證
 - `save_training_history()` 單獨測過：一般情況、續訓合併（epoch 1–3 存檔後再存 4–5，CSV 正確接成 1–5）、混入 torch tensor 的 accuracy、空 list 回傳 `(None, None)` 不炸，PNG 有實際開起來看過。
@@ -707,3 +707,65 @@ signal = torch.fft.irfft(spec * gain, n=sig_len, dim=-1)
 
 ## 尚未驗證
 還沒實際訓練過。下次跑的時候這一版等於「只有頻域擾動」的 WithAug，可以直接跟 NoAug 比。
+
+# 2026/09/11 Performance_Matrix 改存到 perf_Matrix/，並修好 NoAug/WithAug 互相覆蓋的問題
+
+## 發現的問題
+混淆矩陣的輸出路徑是：
+
+```python
+output_excel = os.path.join(basepath, uuid+"_Performance_Matrix.xlsx")
+```
+
+直接寫在 `basepath`（= `Model/`）根目錄，**路徑裡完全沒有 `splitting_ratio` 也沒有 `model_subdir`** —— 跟 `Best_*_Model`、`Temp_*_Model`、`GlucoseData` 等其他所有輸出都不一樣。結果就是不同模式跑完會互相覆蓋同名檔案。
+
+**這不是理論問題，已經實際發生了。** 比對時間戳可以確認：
+
+| 資料夾 | Performance_*.txt 時間範圍 |
+|---|---|
+| NoAug | 2026-09-09 09:28 ~ 10:02 |
+| WithAug_1 | 2026-09-09 10:19 ~ 11:31 |
+| WithAug_2 | 2026-09-11 01:52 ~ 03:02 |
+
+而 `Model/` 根目錄那 10 個 xlsx 的時間是 **2026-09-11 01:57 ~ 03:05**，對應的是 WithAug_2。也就是說 **NoAug 與 WithAug_1 的混淆矩陣都已經被 WithAug_2 蓋掉，救不回來了**（`.pth` 和 `Performance_*.txt` 因為路徑有分模式，都還在）。
+
+## 改法
+三分類（[L1387](M5_DataAug.py#L1387)）與二分類（[L1929](M5_DataAug.py#L1929)）兩處都改成：
+
+```python
+output_excel = os.path.join(basepath,"perf_Matrix",model_subdir,uuid+"_Performance_Matrix.xlsx")
+os.makedirs(os.path.dirname(output_excel), exist_ok=True)
+```
+
+輸出結構變成：
+
+```
+Model/perf_Matrix/
+├── NoAug/       <uuid>_Performance_Matrix.xlsx
+├── WithAug_1/   <uuid>_Performance_Matrix.xlsx
+└── WithAug_2/   <uuid>_Performance_Matrix.xlsx
+```
+
+`model_subdir` 是空字串時 `os.path.join` 會自動略過該層，退回 `perf_Matrix/` 根目錄，不會產生空目錄或路徑錯誤。加了 `os.makedirs(..., exist_ok=True)`，因為這個資料夾不像 `save_path` 在訓練前就被建好。
+
+## 既有檔案的處理
+`Model/` 根目錄原本那 10 個 xlsx 已依時間戳判定屬於 WithAug_2，搬到 `Model/perf_Matrix/WithAug_2/`。`Model/` 根目錄現在沒有殘留的 xlsx。
+
+（xlsx 有被 .gitignore 排除，所以這個搬移只影響本機，不進版控。）
+
+## 驗證
+用暫存目錄實測三種 `model_subdir` 的路徑產生結果：
+
+| model_subdir | 產生的路徑 |
+|---|---|
+| `'WithAug_2'` | `perf_Matrix/WithAug_2/2197_Performance_Matrix.xlsx` |
+| `'NoAug'` | `perf_Matrix/NoAug/2208_Performance_Matrix.xlsx` |
+| `''`（預設值） | `perf_Matrix/2249_Performance_Matrix.xlsx` |
+
+三種都能正確建立目錄並寫出 xlsx。
+
+## 這次只改了 M5_DataAug.py
+`Model_Builder_Predictor_Belle.py` 沒有這段 Excel 匯出程式碼，所以不受影響。
+
+## 給之後的提醒
+**任何會依 NoAug/WithAug 分別產生的輸出，路徑裡一定要帶 `model_subdir`。** 這次是靠時間戳才反推出那批 xlsx 屬於哪一輪；如果當時多跑幾輪，就完全分不出來了。
