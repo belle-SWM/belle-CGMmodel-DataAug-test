@@ -47,6 +47,8 @@ from SWMlib.common.calculation import normalization
 from SWMlib.ecg.baseline import baseline_remove
 from SWMlib.ecg.noise_remove import remove_spike, emg_detector_remover
 
+from common import save_training_history
+
 def get_version(): ###取得版本號
 
     return '007'
@@ -1490,9 +1492,11 @@ def BuildModel_ThreeClasses(uuid,basepath,splitting_ratio=""):
             print('Cached:   ', round(torch.cuda.memory_reserved(0)/1024**3,1), 'GB')
 
     
+        ###Loss_list/ACCs 移到 if 外面：續訓(Epoch_range[0] != 0)時原本不會被初始化，迴圈裡的 append 會 NameError
+        Loss_list = []
+        ACCs = []
+
         if Epoch_range[0] == 0:
-            Loss_list = []
-            ACCs = []
     
             model = CNN(data_len=dataset.data_len, input_channel=dataset.channel)
             ##initialize_weights(model)  ###模型權重初始化
@@ -1606,6 +1610,10 @@ def BuildModel_ThreeClasses(uuid,basepath,splitting_ratio=""):
     
         torch.save(model.state_dict(),os.path.join(os.path.abspath(save_path),"Model_"+str(uuid)+"_"+str(epoch+1)+".pth"))
     
+        ###把這次訓練每個 epoch 的 loss / accuracy 落地成 CSV + 曲線圖，跟 .pth 放在同一個資料夾
+        save_training_history(save_path, uuid, Loss_list, ACCs,
+                              tag='ThreeClasses', start_epoch=Epoch_range[0] + 1)
+
         ####-----------------Test Model----------------------       
         num_epoch = epoch_number      
         model = CNN(data_len=dataset.data_len, input_channel=dataset.channel)
@@ -1903,9 +1911,11 @@ def BuildModel_TwoClasses(uuid,basepath,splitting_ratio=""):
             print('Allocated:', round(torch.cuda.memory_allocated(0)/1024**3,1), 'GB')
             print('Cached:   ', round(torch.cuda.memory_reserved(0)/1024**3,1), 'GB')
 
+        ###Loss_list/ACCs 移到 if 外面：續訓(Epoch_range[0] != 0)時原本不會被初始化，迴圈裡的 append 會 NameError
+        Loss_list = []
+        ACCs = []
+
         if Epoch_range[0] == 0:
-            Loss_list = []
-            ACCs = []
     
             model = TwoClasses_CNN(data_len=dataset.data_len, input_channel=dataset.channel)        
             initialize_weights(model)  ###模型參數初始化
@@ -2011,6 +2021,10 @@ def BuildModel_TwoClasses(uuid,basepath,splitting_ratio=""):
                 break
     
         torch.save(model.state_dict(),os.path.join(os.path.abspath(save_path),"TwoClassesModel_"+str(uuid)+"_"+str(epoch+1)+".pth"))
+
+        ###把這次訓練每個 epoch 的 loss / accuracy 落地成 CSV + 曲線圖，跟 .pth 放在同一個資料夾
+        save_training_history(save_path, uuid, Loss_list, ACCs,
+                              tag='TwoClasses', start_epoch=Epoch_range[0] + 1)
 
         ### ------------------------Testing Data--------------------
         num_epoch = epoch_number

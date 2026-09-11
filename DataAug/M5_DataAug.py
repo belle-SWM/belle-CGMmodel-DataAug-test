@@ -39,6 +39,7 @@ from common import (
     BalancedBatchSampler,
     initialize_weights,
     train_valid_split_indices,
+    save_training_history,
 )
 
   
@@ -764,8 +765,9 @@ def BuildModel_ThreeClasses(uuid,basepath,splitting_ratio="",model_subdir="",aug
     
     dataset = ECGDataset(dir_path = current_path, method = Method)
     
-    Epoch_range = range(0, 800) 
-    patience =50
+    Epoch_range = range(0, 300)
+    patience =30
+    scheduler_patience = 15  ###要小於early-stopping的patience，否則LR還沒衰減就先被early stop停掉
     Batch_size = 32
     valid_split = 0.1
     shuffle_flag = True
@@ -867,7 +869,7 @@ def BuildModel_ThreeClasses(uuid,basepath,splitting_ratio="",model_subdir="",aug
         torch.backends.cudnn.benchmark = False
     '''
 
-    while(loopindex<20):  ###執行20次訓練，取最好一次
+    while(loopindex<5):  ###執行5次訓練，取最好一次
 
         loopindex=loopindex+1
 
@@ -882,11 +884,13 @@ def BuildModel_ThreeClasses(uuid,basepath,splitting_ratio="",model_subdir="",aug
             print('Allocated:', round(torch.cuda.memory_allocated(0)/1024**3,1), 'GB')
             print('Cached:   ', round(torch.cuda.memory_reserved(0)/1024**3,1), 'GB')
 
-    
+
+        ###Loss_list/ACCs 移到 if 外面：續訓(Epoch_range[0] != 0)時原本不會被初始化，迴圈裡的 append 會 NameError
+        Loss_list = []
+        ACCs = []
+
         if Epoch_range[0] == 0:
-            Loss_list = []
-            ACCs = []
-    
+
             model=CNN_Transformer(data_len=dataset.data_len, input_channel=dataset.channel)
             initialize_weights(model)  ###模型權重初始化
             model = model.to(device)
@@ -898,7 +902,7 @@ def BuildModel_ThreeClasses(uuid,basepath,splitting_ratio="",model_subdir="",aug
         optimizer = optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999), weight_decay=1e-3)
         ##optimizer = optim.Adam(model.parameters(), lr=0.0003, betas=(0.9, 0.999), weight_decay=1e-3)
        
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, verbose=1,patience=patience, cooldown=0, min_lr=0.00001)   
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, verbose=1,patience=scheduler_patience, cooldown=0, min_lr=0.00001)
 
         n_patience = 0
         min_valid_loss = 0
@@ -1007,6 +1011,10 @@ def BuildModel_ThreeClasses(uuid,basepath,splitting_ratio="",model_subdir="",aug
             
         torch.save(model.state_dict(),os.path.join(os.path.abspath(save_path),"Model_"+str(uuid)+"_"+str(epoch+1)+".pth"))
         
+        ###把這次訓練每個 epoch 的 loss / accuracy 落地成 CSV + 曲線圖，跟 .pth 放在同一個資料夾
+        save_training_history(save_path, uuid, Loss_list, ACCs,
+                              tag='ThreeClasses', start_epoch=Epoch_range[0] + 1)
+
         ####-----------------Test Model----------------------       
         num_epoch = epoch_number      
         ##model = CNN(data_len=dataset.data_len, input_channel=1)
@@ -1398,9 +1406,10 @@ def BuildModel_TwoClasses(uuid,basepath,splitting_ratio="",model_subdir="",augme
 
     dataset = ECGDataset(dir_path = current_path, method=Method, classes=2)
 
-    Epoch_range = range(0, 800) 
-    patience =50
-    Batch_size = 32 ##256 ###128 
+    Epoch_range = range(0, 300)
+    patience =30
+    scheduler_patience = 15  ###要小於early-stopping的patience，否則LR還沒衰減就先被early stop停掉
+    Batch_size = 32 ##256 ###128
     valid_split = 0.1
     random_seed = 10
            
@@ -1505,8 +1514,8 @@ def BuildModel_TwoClasses(uuid,basepath,splitting_ratio="",model_subdir="",augme
     '''
 
 
-    while(loopindex<20):  ###執行20次訓練，取最好一次
-    
+    while(loopindex<5):  ###執行5次訓練，取最好一次
+
         print('uuid:',uuid)
         loopindex=loopindex+1
         
@@ -1521,9 +1530,11 @@ def BuildModel_TwoClasses(uuid,basepath,splitting_ratio="",model_subdir="",augme
             print('Allocated:', round(torch.cuda.memory_allocated(0)/1024**3,1), 'GB')
             print('Cached:   ', round(torch.cuda.memory_reserved(0)/1024**3,1), 'GB')
 
+        ###Loss_list/ACCs 移到 if 外面：續訓(Epoch_range[0] != 0)時原本不會被初始化，迴圈裡的 append 會 NameError
+        Loss_list = []
+        ACCs = []
+
         if Epoch_range[0] == 0:
-            Loss_list = []
-            ACCs = []
     
             ##model = TwoClasses_CNN(data_len=dataset.data_len, input_channel=dataset.channel)        
             model = TwoClasses_Transformer(data_len=dataset.data_len, input_channel=dataset.channel) 
@@ -1539,9 +1550,8 @@ def BuildModel_TwoClasses(uuid,basepath,splitting_ratio="",model_subdir="",augme
         
         optimizer = optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999), weight_decay=1e-3)
         ###optimizer = optim.Adam(model.parameters(), lr=0.0003, betas=(0.9, 0.999), weight_decay=1e-3)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, verbose=1, patience=100, cooldown=0, min_lr=0.00001)
-    
-        patience = 100
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, verbose=1, patience=scheduler_patience, cooldown=0, min_lr=0.00001)
+
         n_patience = 0
         min_valid_loss = 0
          
@@ -1627,6 +1637,10 @@ def BuildModel_TwoClasses(uuid,basepath,splitting_ratio="",model_subdir="",augme
                 break
              
            
+        ###把這次訓練每個 epoch 的 loss / accuracy 落地成 CSV + 曲線圖，跟 .pth 放在同一個資料夾
+        save_training_history(save_path, uuid, Loss_list, ACCs,
+                              tag='TwoClasses', start_epoch=Epoch_range[0] + 1)
+
         ## ------------------------Testing Data--------------------      
         ##model = TwoClasses_CNN(data_len=dataset.data_len, input_channel=dataset.channel)
         
@@ -1965,32 +1979,31 @@ if __name__ == "__main__":
     server_db_path='G:\\.shortcut-targets-by-id\\1Mc_sTYrGzDau1JPki2AQDpV4FeX5tKu3\\SWM_DataCenter\\Health_Server_Script\\_rawdata_download'
    
          
-    for i in range(0,17):
-        print('index:',i)       
+    target_uuids=['2197','2199','2204','2206','2208','2210','2215','2216','2223','2249']  ###這次要訓練的uuid(Model/70_30/GlucoseData/<uuid>底下已有Train/Test資料)
+
+    model_subdir="WithAug_1"   ###無augmentation版本，輸出到Model/70_30/NoAug底下；要跑有augmentation版本請改成"WithAug"並把augment改成True，否則會覆蓋掉這次的結果
+    augment=True
+
+    for i in range(0,len(user_information)):
 
         user_info=user_information[i]
-        
-        ##-------step 1. 基本設定--------
-        uuid=user_info[0]   
-        
-        '''
-        if(uuid !='2133' and uuid!='2131' and uuid!='2208' and uuid!='2205'):
-            continue
-        '''
 
-        if(uuid !='2131'):
+        ##-------step 1. 基本設定--------
+        uuid=user_info[0]
+
+        if uuid not in target_uuids:
             continue
-              
+
         start_time=user_info[1]  ##第一筆血糖資料記錄日期
         end_time=user_info[2]    ##最後一筆血糖資料紀錄日期
         print('index:',i,' uuid:',uuid)
-        srj_db_path='C:\\Users\\User\\Desktop\\DataDB\\'+uuid   ###srj檔放置路徑
-        
-        
-        start_time = time.time()       
+        srj_db_path=str(mother_path/"DataDB"/uuid)   ###srj檔放置路徑
+
+
+        start_time = time.time()
         ##-------step 2. 血糖模型建立---------
         ##status, errorcode, message = BuildModel(uuid, base_path, srj_db_path, glucosedata_path, processnum=8, splitting_ratio="70_30")  ##建立個人化模型(自動根據是否有低血糖資料，決定訓練中高血糖模型或是高中低血糖模型)
-        status, errorcode, message = BuildModel(uuid,base_path,srj_db_path,glucosedata_path,server_db_path,processnum=8,splitting_ratio="70_30")
+        status, errorcode, message = BuildModel(uuid,base_path,srj_db_path,glucosedata_path,server_db_path,processnum=8,splitting_ratio="70_30",model_subdir=model_subdir,augment=augment)
         end_time = time.time()
         execution_time = end_time - start_time
         print(f"函式執行時間: {execution_time:.6f} 秒")

@@ -577,3 +577,101 @@ def build_analysis_report_inputs(traindata, testdata, filenames, predict_list, t
     return (train_glucose_values, train_glucose_by_class, test_glucose_values, test_glucose_by_class,
             prediction_results, correct_glucose, wrong_glucose, wrong_predictions)
 
+
+
+# ─── 訓練歷程記錄 ──────────────────────────────────────────────────
+# 訓練迴圈裡累積的 Loss_list / ACCs 原本只存在記憶體，跑完就沒了，
+# 只能從 console 的 print 回頭翻。這裡把它們落地成 CSV + 曲線圖，
+# 跟 .pth checkpoint 放在同一個 save_path 底下。
+#
+#   <uuid>_<tag>_training_history.csv   欄位：epoch, train_loss, valid_loss, train_acc, valid_acc
+#   <uuid>_<tag>_training_curve.png     上圖 loss、下圖 accuracy
+#
+# start_epoch 用來支援續訓(Epoch_range[0] != 0)：傳 Epoch_range[0]+1 進來，
+# epoch 編號才會接續，CSV 也會保留前一次的紀錄而不是整個蓋掉。
+def _history_value(v):
+    ###train_acc/valid_acc 在不同迴圈裡可能是 float、numpy 純量或還沒 .item() 的 torch tensor，這裡統一轉成 float
+    try:
+        if hasattr(v, 'item'):
+            return float(v.item())
+        return float(v)
+    except Exception:
+        return float('nan')
+
+
+def save_training_history(save_path, uuid, loss_list, accs, tag='', start_epoch=1):
+    if not loss_list:
+        return None, None
+
+    save_path = os.path.abspath(save_path)
+    os.makedirs(save_path, exist_ok=True)
+    prefix = f"{uuid}_{tag}" if tag else str(uuid)
+    csv_path = os.path.join(save_path, prefix + "_training_history.csv")
+    png_path = os.path.join(save_path, prefix + "_training_curve.png")
+
+    rows = []
+    for i, pair in enumerate(loss_list):
+        acc_pair = accs[i] if i < len(accs) else (float('nan'), float('nan'))
+        rows.append({
+            'epoch': start_epoch + i,
+            'train_loss': _history_value(pair[0]),
+            'valid_loss': _history_value(pair[1]),
+            'train_acc': _history_value(acc_pair[0]),
+            'valid_acc': _history_value(acc_pair[1]),
+        })
+    df = pd.DataFrame(rows)
+
+    ###續訓時把舊紀錄接回來，重跑到的 epoch 以這次的結果為準
+    if start_epoch > 1 and os.path.exists(csv_path):
+        try:
+            old = pd.read_csv(csv_path)
+            old = old[old['epoch'] < start_epoch]
+            df = pd.concat([old, df], ignore_index=True)
+        except Exception as e:
+            print("讀取舊的 training history 失敗，這次直接覆寫：%s" % e)
+
+    df.to_csv(csv_path, index=False)
+    print("Training history saved: %s" % csv_path)
+
+    ###畫圖失敗(例如沒有 matplotlib、字型問題)不該讓整個訓練掛掉，所以包 try
+    try:
+        import matplotlib
+        matplotlib.use('Agg')  ###伺服器/容器沒有顯示器，固定用非互動式 backend
+        import matplotlib.pyplot as plt
+
+        fig, (ax_loss, ax_acc) = plt.subplots(2, 1, figsize=(9, 8), sharex=True)
+
+        ax_loss.plot(df['epoch'], df['train_loss'], marker='o', markersize=3, label='Train loss')
+        ax_loss.plot(df['epoch'], df['valid_loss'], marker='o', markersize=3, label='Valid loss')
+        ###標出 valid loss 最低的那個 epoch，也就是 early stopping 真正選中的模型
+        if df['valid_loss'].notna().any():
+            best = df.loc[df['valid_loss'].idxmin()]
+            ax_loss.axvline(best['epoch'], color='gray', linestyle='--', linewidth=1)
+            ###最佳 epoch 靠近右邊界時，標註改放到虛線左側，避免被圖框切掉
+            on_right = best['epoch'] > (df['epoch'].min() + df['epoch'].max()) / 2
+            ax_loss.annotate("best epoch %d\nvalid loss %.4f" % (int(best['epoch']), best['valid_loss']),
+                             xy=(best['epoch'], best['valid_loss']),
+                             xytext=(-5 if on_right else 5, 12), textcoords='offset points',
+                             ha='right' if on_right else 'left', fontsize=8, color='gray')
+        ax_loss.set_ylabel('Loss')
+        ax_loss.set_title("%s  training history" % prefix)
+        ax_loss.legend()
+        ax_loss.grid(alpha=0.3)
+
+        ax_acc.plot(df['epoch'], df['train_acc'], marker='o', markersize=3, label='Train ACC')
+        ax_acc.plot(df['epoch'], df['valid_acc'], marker='o', markersize=3, label='Valid ACC')
+        ax_acc.set_xlabel('Epoch')
+        ax_acc.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))  ###epoch 是整數，不要出現 1.5 這種刻度
+        ax_acc.set_ylabel('Accuracy (%)')
+        ax_acc.legend()
+        ax_acc.grid(alpha=0.3)
+
+        fig.tight_layout()
+        fig.savefig(png_path, dpi=120)
+        plt.close(fig)
+        print("Training curve saved: %s" % png_path)
+    except Exception as e:
+        print("畫 training curve 失敗(CSV 已存檔，不影響訓練)：%s" % e)
+        png_path = None
+
+    return csv_path, png_path

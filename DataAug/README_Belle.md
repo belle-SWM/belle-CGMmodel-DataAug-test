@@ -356,3 +356,151 @@ BuildModel_TwoClasses(uuid, basepath, splitting_ratio, model_subdir="WithAug", a
 
 ## 尚未驗證
 這次只確認了程式可以正常 import／`py_compile`，還沒有實際跑過訓練比較兩者績效數字（跟前面「有無 augmentation」在 Model_Builder_Predictor_Belle.py 上跑的縮小規模測試不是同一次驗證，`M5_DataAug.py` 這邊用的是不同的 Transformer 架構、分層切分＋BalancedBatchSampler，需要另外實際跑一次才能拿到數字）。等資料傳輸完成、`Model/70_30/GlucoseData/<uuid>` 底下有完整 Train/Test 資料後再實測。
+
+
+# 2026/09/09 準備 M5_DataAug.py 跑 NoAug 全量訓練，並把訓練規模降級
+
+## 背景
+上一節「尚未驗證」的前置條件已經滿足：10 個 uuid 的 `Model/70_30/GlucoseData/<uuid>` 都已經有完整 Train/Test 資料（`2215`、`2216`、`2223`、`2249` 是這天補跑 `Model_Builder_Predictor_Belle.py` 的 `data_processing` 產生的，2223+2249 共 1390 秒、2215+2216 共 1077 秒）。所以這次開始實際用 M5 跑「無 augmentation」那一邊。
+
+各 uuid 資料現況與 `BuildModel()` 會自動選到的分支：
+
+| uuid | Train High/Normal/Low | Test High/Normal/Low | 分支 |
+|---|---|---|---|
+| 2197 | 765 / 2948 / 0 | 289 / 1120 / 0 | 二分類 |
+| 2199 | 1140 / 2278 / 0 | 167 / 1403 / 0 | 二分類 |
+| 2204 | 83 / 1669 / 0 | 32 / 379 / 0 | 二分類 |
+| 2206 | 57 / 1048 / 0 | 79 / 2278 / 0 | 二分類 |
+| 2249 | 2563 / 2817 / 0 | 1162 / 1622 / 0 | 二分類 |
+| 2208 | 50 / 753 / 514 | 210 / 204 / 750 | 三分類 |
+| 2210 | 246 / 2082 / 418 | 18 / 681 / 542 | 三分類 |
+| 2215 | 228 / 1169 / 1483 | 276 / 468 / 1127 | 三分類 |
+| 2216 | 270 / 1054 / 541 | 197 / 1920 / 1339 | 三分類 |
+| 2223 | 844 / 1403 / 166 | 271 / 910 / 88 | 三分類 |
+
+## `__main__` 的設定改動
+原本的 `__main__` 是 `for i in range(0,17)` 搭配寫死的 `if(uuid !='2131'): continue`，只會跑 uuid 2131（而 2131 根本沒有資料，等於跑不動）。改成：
+
+```python
+target_uuids=['2197','2199','2204','2206','2208','2210','2215','2216','2223','2249']
+
+model_subdir="NoAug"   ###要跑有augmentation版本請改成"WithAug"並把augment改成True
+augment=False
+
+for i in range(0,len(user_information)):
+    uuid=user_info[0]
+    if uuid not in target_uuids:
+        continue
+    ...
+    status, errorcode, message = BuildModel(...,model_subdir=model_subdir,augment=augment)
+```
+
+- 迴圈改成掃完整個 `user_information`（原本只掃前 17 筆，但 `2210`、`2216`、`2199` 等 uuid 在第 17 筆之後，掃不到），再用 `target_uuids` 過濾。實際命中順序是 `2197, 2208, 2215, 2223, 2249, 2199, 2206, 2204, 2210, 2216`（照 `user_information` 原順序）。
+- `srj_db_path` 從 `C:\Users\User\Desktop\DataDB\<uuid>` 改成本機的 `DataDB/<uuid>`。這個參數 `BuildModel` 實際沒有用到（只有資料處理階段才需要 srj），改掉純粹是避免留著 Windows 路徑誤導。
+- 輸出會進 `Model/70_30/NoAug/Best_TwoClasses_Model/<uuid>/` 或 `Best_ThreeClasses_Model/<uuid>/`（依分支）。之後跑 WithAug 只要改 `model_subdir`／`augment` 兩個值，不會覆蓋這次結果。
+
+## 訓練規模降級（兩條路徑都改成同一組）
+原設定跑起來太慢：2197 第一輪（二分類、patience 100）就花了約 9 分鐘，換算 20 輪約 2.5～3 小時／uuid，10 個 uuid 要 25～30 小時，而且 NoAug/WithAug 要各跑一次。所以先降級：
+
+| 參數 | 原本（三分類 / 二分類） | 改成 | 位置 |
+|---|---|---|---|
+| 訓練輪數 | 20 / 20 | **5** | [L872](M5_DataAug.py#L872)、[L1517](M5_DataAug.py#L1517) |
+| Epoch 上限 | 800 / 800 | **300** | [L768](M5_DataAug.py#L768)、[L1409](M5_DataAug.py#L1409) |
+| Early-stop patience | 50 / **100** | **30** | [L769](M5_DataAug.py#L769)、[L1410](M5_DataAug.py#L1410) |
+| Scheduler patience | 50 / 100 | **15** | [L905](M5_DataAug.py#L905)、[L1553](M5_DataAug.py#L1553) |
+
+預估降到每個 uuid 約 20～25 分鐘、10 個 uuid 約 3.5～4 小時，NoAug＋WithAug 兩邊合計約 7～8 小時。
+
+**選這組數字的理由**：那 20 輪是「用不同隨機初始化重跑整個訓練、取最好的一次」（best-of-N），輪數越多只是把最佳值往上推，對「有無 augmentation 誰比較好」這個比較本身幫助有限；降到 5 輪仍然取樣得到初始化的變異。Epoch 上限 300 搭配 patience 30，實務上大多會在早停就結束，上限只是防呆。**最重要的是 NoAug 和 WithAug 必須用完全同一組設定，否則兩邊數字不能比。**
+
+## 順手修掉的兩個參數問題
+1. **二分類的 `patience` 被覆蓋成 100**：`BuildModel_TwoClasses` 開頭設了 `patience=50`，但迴圈裡（原 L1546）又有一行 `patience = 100` 每輪重新賦值，所以實際生效的 early-stop patience 一直是 100，跟三分類的 50 不一致（也是 2197 第一輪要跑 9 分鐘的原因）。已移除那行覆蓋，現在兩條路徑都由函式開頭的 `patience` 統一控制。
+2. **scheduler patience 拆成獨立變數 `scheduler_patience`**：三分類原本是 `ReduceLROnPlateau(..., patience=patience)`，直接複用 early-stop 的 `patience`；兩者相等時 LR 永遠不會衰減就先被 early stop 停掉，`ReduceLROnPlateau` 等於白設。現在 `scheduler_patience=15` < `patience=30`，LR 至少有一次衰減的機會。
+
+## 這次沒有改的東西
+`ReduceLROnPlateau(..., verbose=1, ...)` 保留不動。前面 2026/09/08 那節提到這個參數在 PyTorch 2.8 會丟 `TypeError`，但這台機器（H100 80GB HBM3）的環境是 **torch 2.5.1+cu121**，`verbose` 還在（只是 deprecated），不會炸。如果之後換到 2.8 以上的環境跑 M5，這兩處（[L905](M5_DataAug.py#L905)、[L1553](M5_DataAug.py#L1553)）要比照 Model_Builder_Predictor_Belle.py 拿掉 `verbose`。
+
+## 怎麼確認訓練真的在 GPU 上
+容器環境裡 `nvidia-smi` 下方的 Processes 表格會是空的（PID namespace 隔離，查詢會顯示 `[Not Found]`），**不能**因為那張表沒列出 process 就以為沒用到 GPU。可靠的確認方式：
+
+1. 看程式自己印的 log（[L877-885](M5_DataAug.py#L877-L885)、[L1523-1531](M5_DataAug.py#L1523-L1531)）每輪開頭會印 `cuda:0`、`GPU Count: 1`、`NVIDIA H100 80GB HBM3`；掉回 CPU 會印 `cpu` 且沒有裝置名稱。
+2. `ls -l /proc/$(pgrep -f M5_DataAug)/fd | grep nvidia` 看 process 有沒有開 `/dev/nvidiaN`（`nvidia-smi -q | grep -i "minor number"` 可以對應是哪張卡）。
+3. `nvidia-smi` 看 GPU-Util／Memory-Usage 有沒有在動。
+
+## 進度追蹤的建議
+訓練 log 只印在終端機，事後查不到。建議啟動時留檔：
+```bash
+cd /share/Belle/DataAug && python M5_DataAug.py 2>&1 | tee train_noaug_$(date +%m%d_%H%M).log
+```
+沒留 log 的話只能從輸出檔案的時間推：`Best_*Model/<uuid>/BestModel_*.pth` 的 mtime 是最後一次「突破」的時間，`Temp_*Model/<uuid>/` 有更新代表還在訓練中。注意二分類的 Temp 只存一個固定檔名 `TwoClassesModel_<uuid>_Best.pth` 反覆覆蓋，看不出輪數／epoch；三分類則是每個 epoch 存一個 `Model_<uuid>_<epoch>.pth`，可以直接從檔名看到 epoch 進度。
+
+## 尚未驗證
+降級後的設定還沒有完整跑過。先前用舊設定（20 輪／800 epochs）跑的那次只完成 2197 的第一輪就停掉，輸出（`Model/70_30/NoAug/`）已經刪除，避免跟降級後的結果混在一起。
+
+# 2026/09/11 補上 training loss / accuracy 的記錄與曲線圖
+
+## 為什麼要改
+前一節「進度追蹤的建議」提到訓練 log 只印在終端機、事後查不到。實際翻程式碼後發現情況比預期更徹底：
+
+四個訓練迴圈裡都有 `Loss_list` 和 `ACCs` 兩個 list，每個 epoch 把 train/valid 的 loss 與 accuracy append 進去 —— 但**全專案沒有任何一處把它們 return、畫圖或寫檔**。grep 過所有出現位置，只有初始化和 append 兩種，函式一結束就被回收。專案裡也沒有 tensorboard / wandb / mlflow / logging / np.save / json.dump 任何一種實驗追蹤機制（全部零命中），唯一會落地的檔案是 confusion matrix 的 `*_Performance_Matrix.xlsx` 和 `.pth` 權重。
+
+也就是說 loss 真正的用途只有控制訓練流程兩件事：餵給 `scheduler.step(valid_loss)` 讓 ReduceLROnPlateau 決定要不要降 LR，以及用 `min_valid_loss` / `n_patience` 做 early stopping 與存檔判斷。曲線長什麼樣、有沒有 overfitting、best epoch 落在哪裡，跑完就查不到了。
+
+## 這次做了什麼
+
+### 1. [common.py](common.py) 新增共用函式 `save_training_history()`
+
+位置 [L582 起](common.py#L582)。每次訓練結束後輸出兩個檔案，跟 `.pth` checkpoint 放在同一個 `save_path`：
+
+| 檔案 | 內容 |
+|---|---|
+| `<uuid>_<tag>_training_history.csv` | 欄位 `epoch, train_loss, valid_loss, train_acc, valid_acc` |
+| `<uuid>_<tag>_training_curve.png` | 上圖 loss、下圖 accuracy，並用灰色虛線標出 valid loss 最低的 epoch（也就是 early stopping 實際選中的那個模型） |
+
+`tag` 用來區分同一個 uuid 底下的兩條路徑，值是 `ThreeClasses` 或 `TwoClasses`。
+
+實作上處理掉的幾個細節：
+
+- **型別不一致**：`valid_acc` 在三分類路徑是 `100*correct/total`，`correct` 來自 `.sum()` 所以是還沒 `.item()` 的 torch tensor；二分類路徑則已經 `.item()` 成 float。統一用 `_history_value()` 轉 float，順便擋掉 numpy 純量。
+- **沒有顯示器**：固定 `matplotlib.use('Agg')`，容器裡不會因為找不到 display 而炸。matplotlib 3.9.4 本來就在 [requirements.txt](requirements.txt) 裡，不用額外安裝。
+- **畫圖失敗不能拖垮訓練**：繪圖整段包在 try 裡，出錯只印一行訊息，CSV 照樣寫出去。訓練跑了幾小時，不該因為畫圖失敗而什麼都沒留下。
+- **續訓**：傳 `start_epoch=Epoch_range[0]+1`，epoch 編號會接續；如果 CSV 已存在，會把 `epoch < start_epoch` 的舊列保留下來再接上新的，不是整個蓋掉。
+
+### 2. 四個訓練迴圈各加一處呼叫
+
+都放在迴圈結束、最後一次 `torch.save` 之後、測試階段之前：
+
+| 檔案 | 位置 | tag |
+|---|---|---|
+| M5_DataAug.py | [L1015](M5_DataAug.py#L1015) | ThreeClasses |
+| M5_DataAug.py | [L1641](M5_DataAug.py#L1641) | TwoClasses |
+| Model_Builder_Predictor_Belle.py | [L1614](Model_Builder_Predictor_Belle.py#L1614) | ThreeClasses |
+| Model_Builder_Predictor_Belle.py | [L2026](Model_Builder_Predictor_Belle.py#L2026) | TwoClasses |
+
+`Model_Builder_Predictor_Belle.py` 原本沒有 import `common`，補了一行 [L50](Model_Builder_Predictor_Belle.py#L50)（檔案開頭本來就有把自己的目錄加進 `sys.path`，所以直接 import 得到）。`M5_DataAug.py` 則是加進既有的 `from common import (...)` 區塊。
+
+## 順手修掉的既有 bug：續訓會 NameError
+
+四個迴圈原本都長這樣：
+
+```python
+if Epoch_range[0] == 0:
+    Loss_list = []
+    ACCs = []
+    model = ...   ###建立新模型
+```
+
+`Loss_list` / `ACCs` 的初始化被包在「從第 0 個 epoch 開始」的守衛裡，但迴圈內的 `Loss_list.append(...)` 是無條件執行的。只要用非零的 `Epoch_range` 續訓，第一個 epoch 就會 `NameError: name 'Loss_list' is not defined`。
+
+已把兩行初始化移到 `if` 外面（[M5 L889](M5_DataAug.py#L889)、[M5 L1534](M5_DataAug.py#L1534)、[MBP L1496](Model_Builder_Predictor_Belle.py#L1496)、[MBP L1915](Model_Builder_Predictor_Belle.py#L1915)），建立模型那段仍然留在守衛內。目前的 `__main__` 都是從 0 開始跑，所以這個 bug 還沒被踩到，但新加的記錄功能會用到續訓路徑，先修掉。
+
+## 驗證
+- `save_training_history()` 單獨測過：一般情況、續訓合併（epoch 1–3 存檔後再存 4–5，CSV 正確接成 1–5）、混入 torch tensor 的 accuracy、空 list 回傳 `(None, None)` 不炸，PNG 有實際開起來看過。
+- 兩個模組都 `import` 成功，且 `save_training_history` 解析到同一個 common.py 的函式物件。
+- 尚未在真實訓練中跑過（等下一次 NoAug 全量訓練驗證）。
+
+## 順帶更新：前一節的行號連結
+這次在 `M5_DataAug.py` 插入 import 與呼叫後，前一節 2026/09/09 引用的行號全部往後位移（位移量 +1 到 +9 不等，因為插入點分散）。已把那一節表格與內文裡的 `M5_DataAug.py#L...` 連結一併更新成現在的行號，內容本身沒有改動。
+
+## 踩到的坑：換行符
+`M5_DataAug.py` 是 **CRLF** 換行（其他 .py 和 .md 都是 LF）。用 Python 以文字模式讀寫會把 CRLF 吃成 LF，導致整個檔案 2000 多行全部變成 diff。已還原成 CRLF，現在 diff 只有實際改動的部分。**之後用腳本批次改這個檔案時要注意**，用 binary 模式讀寫或改完檢查 `git diff --stat` 的行數是否合理。
