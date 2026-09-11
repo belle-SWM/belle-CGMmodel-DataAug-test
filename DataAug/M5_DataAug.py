@@ -50,20 +50,6 @@ def get_version(): ###取得版本號
 
     return '007'
 
-
-###──── Data Augmentation 開關 ──────────────────────────────────────────
-###這次要單獨測試「頻域平滑幅度擾動」的效果，所以先把原本三種時域增強關掉。
-###用開關而不是註解掉：之後要評估綜合方式時只要改這幾個值，不必再動 augment_signal。
-AUG_GAUSSIAN_NOISE   = False   ##加高斯雜訊
-AUG_AMPLITUDE_SCALE  = False   ##振幅隨機縮放 0.9~1.1 倍
-AUG_TIME_SHIFT       = False   ##時間軸剛性平移(邊緣補值)
-AUG_FREQ_MAGNITUDE   = True    ##頻域平滑幅度擾動(只動幅度包絡，相位不動)
-
-###頻域擾動的參數
-FREQ_AUG_AMPLITUDE   = 0.4     ##增益包絡的擾動幅度(±40%)
-FREQ_AUG_CONTROL_PTS = 5       ##控制點數，越少包絡越平滑、越不易產生 ringing
-
-
 class ECGDataset(Dataset):
     def __init__(self, dir_path, method='raw', classes=3, augment=False):
         self.dir_path = os.path.abspath(dir_path)
@@ -776,7 +762,7 @@ def BuildModel_ThreeClasses(uuid,basepath,splitting_ratio="",model_subdir="",aug
         with open(model_current_best_performance_txtfile, "w") as file:
             file.write("Sensitivity:0\n" )
             file.write("Specificity:0\n" )
-            file.write("-----------------------")
+            file.write("-----------------------\n")
             file.write("High_Sensitivity:0\n" )
             file.write("Low_Sensitivity:0\n")
             file.write("Normal_Sensitivity:0\n")
@@ -2031,8 +2017,19 @@ if __name__ == "__main__":
          
     target_uuids=['2197','2199','2204','2206','2208','2210','2215','2216','2223','2249']  ###這次要訓練的uuid(Model/70_30/GlucoseData/<uuid>底下已有Train/Test資料)
 
-    model_subdir="WithAug_2"   ###無augmentation版本，輸出到Model/70_30/NoAug底下；要跑有augmentation版本請改成"WithAug"並把augment改成True，否則會覆蓋掉這次的結果
+    model_subdir="WithAug_3"   ###無augmentation版本，輸出到Model/70_30/NoAug底下；要跑有augmentation版本請改成"WithAug"並把augment改成True，否則會覆蓋掉這次的結果
     augment=True
+    ###──── Data Augmentation 開關 ──────────────────────────────────────────
+    ###這次要單獨測試「頻域平滑幅度擾動」的效果，所以先把原本三種時域增強關掉。
+    ###用開關而不是註解掉：之後要評估綜合方式時只要改這幾個值，不必再動 augment_signal。
+    AUG_GAUSSIAN_NOISE   = False   ##加高斯雜訊
+    AUG_AMPLITUDE_SCALE  = False   ##振幅隨機縮放 0.9~1.1 倍
+    AUG_TIME_SHIFT       = False   ##時間軸剛性平移(邊緣補值)
+    AUG_FREQ_MAGNITUDE   = True    ##頻域平滑幅度擾動(只動幅度包絡，相位不動)
+
+    ###頻域擾動的參數
+    FREQ_AUG_AMPLITUDE   = 0.4     ##增益包絡的擾動幅度(±40%)
+    FREQ_AUG_CONTROL_PTS = 5       ##控制點數，越少包絡越平滑、越不易產生 ringing
 
     for i in range(0,len(user_information)):
 

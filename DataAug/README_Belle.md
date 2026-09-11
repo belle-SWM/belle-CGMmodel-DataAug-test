@@ -404,10 +404,10 @@ for i in range(0,len(user_information)):
 
 | 參數 | 原本（三分類 / 二分類） | 改成 | 位置 |
 |---|---|---|---|
-| 訓練輪數 | 20 / 20 | **5** | [L912](M5_DataAug.py#L912)、[L1562](M5_DataAug.py#L1562) |
-| Epoch 上限 | 800 / 800 | **300** | [L808](M5_DataAug.py#L808)、[L1454](M5_DataAug.py#L1454) |
-| Early-stop patience | 50 / **100** | **30** | [L809](M5_DataAug.py#L809)、[L1455](M5_DataAug.py#L1455) |
-| Scheduler patience | 50 / 100 | **15** | [L945](M5_DataAug.py#L945)、[L1598](M5_DataAug.py#L1598) |
+| 訓練輪數 | 20 / 20 | **5** | [L898](M5_DataAug.py#L898)、[L1548](M5_DataAug.py#L1548) |
+| Epoch 上限 | 800 / 800 | **300** | [L794](M5_DataAug.py#L794)、[L1440](M5_DataAug.py#L1440) |
+| Early-stop patience | 50 / **100** | **30** | [L795](M5_DataAug.py#L795)、[L1441](M5_DataAug.py#L1441) |
+| Scheduler patience | 50 / 100 | **15** | [L931](M5_DataAug.py#L931)、[L1584](M5_DataAug.py#L1584) |
 
 預估降到每個 uuid 約 20～25 分鐘、10 個 uuid 約 3.5～4 小時，NoAug＋WithAug 兩邊合計約 7～8 小時。
 
@@ -418,12 +418,12 @@ for i in range(0,len(user_information)):
 2. **scheduler patience 拆成獨立變數 `scheduler_patience`**：三分類原本是 `ReduceLROnPlateau(..., patience=patience)`，直接複用 early-stop 的 `patience`；兩者相等時 LR 永遠不會衰減就先被 early stop 停掉，`ReduceLROnPlateau` 等於白設。現在 `scheduler_patience=15` < `patience=30`，LR 至少有一次衰減的機會。
 
 ## 這次沒有改的東西
-`ReduceLROnPlateau(..., verbose=1, ...)` 保留不動。前面 2026/09/08 那節提到這個參數在 PyTorch 2.8 會丟 `TypeError`，但這台機器（H100 80GB HBM3）的環境是 **torch 2.5.1+cu121**，`verbose` 還在（只是 deprecated），不會炸。如果之後換到 2.8 以上的環境跑 M5，這兩處（[L945](M5_DataAug.py#L945)、[L1598](M5_DataAug.py#L1598)）要比照 Model_Builder_Predictor_Belle.py 拿掉 `verbose`。
+`ReduceLROnPlateau(..., verbose=1, ...)` 保留不動。前面 2026/09/08 那節提到這個參數在 PyTorch 2.8 會丟 `TypeError`，但這台機器（H100 80GB HBM3）的環境是 **torch 2.5.1+cu121**，`verbose` 還在（只是 deprecated），不會炸。如果之後換到 2.8 以上的環境跑 M5，這兩處（[L931](M5_DataAug.py#L931)、[L1584](M5_DataAug.py#L1584)）要比照 Model_Builder_Predictor_Belle.py 拿掉 `verbose`。
 
 ## 怎麼確認訓練真的在 GPU 上
 容器環境裡 `nvidia-smi` 下方的 Processes 表格會是空的（PID namespace 隔離，查詢會顯示 `[Not Found]`），**不能**因為那張表沒列出 process 就以為沒用到 GPU。可靠的確認方式：
 
-1. 看程式自己印的 log（[L917-925](M5_DataAug.py#L917-L925)、[L1568-1576](M5_DataAug.py#L1568-L1576)）每輪開頭會印 `cuda:0`、`GPU Count: 1`、`NVIDIA H100 80GB HBM3`；掉回 CPU 會印 `cpu` 且沒有裝置名稱。
+1. 看程式自己印的 log（[L903-911](M5_DataAug.py#L903-L911)、[L1554-1562](M5_DataAug.py#L1554-L1562)）每輪開頭會印 `cuda:0`、`GPU Count: 1`、`NVIDIA H100 80GB HBM3`；掉回 CPU 會印 `cpu` 且沒有裝置名稱。
 2. `ls -l /proc/$(pgrep -f M5_DataAug)/fd | grep nvidia` 看 process 有沒有開 `/dev/nvidiaN`（`nvidia-smi -q | grep -i "minor number"` 可以對應是哪張卡）。
 3. `nvidia-smi` 看 GPU-Util／Memory-Usage 有沒有在動。
 
@@ -472,8 +472,8 @@ cd /share/Belle/DataAug && python M5_DataAug.py 2>&1 | tee train_noaug_$(date +%
 
 | 檔案 | 位置 | tag |
 |---|---|---|
-| M5_DataAug.py | [L1055](M5_DataAug.py#L1055) | ThreeClasses |
-| M5_DataAug.py | [L1686](M5_DataAug.py#L1686) | TwoClasses |
+| M5_DataAug.py | [L1041](M5_DataAug.py#L1041) | ThreeClasses |
+| M5_DataAug.py | [L1672](M5_DataAug.py#L1672) | TwoClasses |
 | Model_Builder_Predictor_Belle.py | [L1625](Model_Builder_Predictor_Belle.py#L1625) | ThreeClasses |
 | Model_Builder_Predictor_Belle.py | [L2037](Model_Builder_Predictor_Belle.py#L2037) | TwoClasses |
 
@@ -492,7 +492,7 @@ if Epoch_range[0] == 0:
 
 `Loss_list` / `ACCs` 的初始化被包在「從第 0 個 epoch 開始」的守衛裡，但迴圈內的 `Loss_list.append(...)` 是無條件執行的。只要用非零的 `Epoch_range` 續訓，第一個 epoch 就會 `NameError: name 'Loss_list' is not defined`。
 
-已把兩行初始化移到 `if` 外面（[M5 L929](M5_DataAug.py#L929)、[M5 L1579](M5_DataAug.py#L1579)、[MBP L1507](Model_Builder_Predictor_Belle.py#L1507)、[MBP L1926](Model_Builder_Predictor_Belle.py#L1926)），建立模型那段仍然留在守衛內。目前的 `__main__` 都是從 0 開始跑，所以這個 bug 還沒被踩到，但新加的記錄功能會用到續訓路徑，先修掉。
+已把兩行初始化移到 `if` 外面（[M5 L915](M5_DataAug.py#L915)、[M5 L1565](M5_DataAug.py#L1565)、[MBP L1507](Model_Builder_Predictor_Belle.py#L1507)、[MBP L1926](Model_Builder_Predictor_Belle.py#L1926)），建立模型那段仍然留在守衛內。目前的 `__main__` 都是從 0 開始跑，所以這個 bug 還沒被踩到，但新加的記錄功能會用到續訓路徑，先修掉。
 
 ## 驗證
 - `save_training_history()` 單獨測過：一般情況、續訓合併（epoch 1–3 存檔後再存 4–5，CSV 正確接成 1–5）、混入 torch tensor 的 accuracy、空 list 回傳 `(None, None)` 不炸，PNG 有實際開起來看過。
@@ -537,7 +537,7 @@ signal = torch.roll(signal, shifts=shift, dims=-1)
 3. 截掉邊緣 5 點的代價實測過，是可以接受的：頭尾 5 點偏離基線只有 0.058 / 0.045，對照 QRS 峰值偏離基線 0.816，**截掉的純粹是基線，沒有波形資訊**。T 波峰在 idx 110–120，離邊界很遠。
 
 ## 改法
-[M5_DataAug.py L123](M5_DataAug.py#L123)、[Model_Builder_Predictor_Belle.py L866](Model_Builder_Predictor_Belle.py#L866)（兩個檔案是同一份重複的 `augment_signal`，一起改）：
+[M5_DataAug.py L109](M5_DataAug.py#L109)、[Model_Builder_Predictor_Belle.py L866](Model_Builder_Predictor_Belle.py#L866)（兩個檔案是同一份重複的 `augment_signal`，一起改）：
 
 ```python
 shift = int(torch.randint(-5, 6, (1,)).item())
@@ -658,7 +658,9 @@ if shift != 0:
 rfft 只有 76 個 bin，解析度 1.67 Hz。能量分布：0–5 Hz 佔 23.5%、5–10 Hz 佔 20.9%、10–20 Hz 佔 31.3%、20–40 Hz 佔 19.9%，**40 Hz 以上只剩 4.4%**。所以「只擾動高頻」這種保守做法幾乎不會產生任何多樣性，沒有意義。
 
 ## 實作：改用開關，這次只測頻域
-為了單獨測試頻域擾動，**沒有把舊的增強註解掉，改成在檔案開頭加開關**（[L57-64](M5_DataAug.py#L57-L64)），之後要評估組合時只要改這幾個值，不必再動 `augment_signal`：
+為了單獨測試頻域擾動，**沒有把舊的增強註解掉，改成用開關控制**，之後要評估組合時只要改這幾個值，不必再動 `augment_signal`：
+
+> 註：這組開關當初加在檔案開頭（模組層級），後來被移到 `__main__` 裡跟 `model_subdir`／`augment` 放在一起（[L2025-2032](M5_DataAug.py#L2025-L2032)）。詳見 2026/09/11 `compare_results.py` 那一節的說明。
 
 ```python
 AUG_GAUSSIAN_NOISE   = False   ##加高斯雜訊
@@ -670,7 +672,7 @@ FREQ_AUG_AMPLITUDE   = 0.4     ##增益包絡的擾動幅度(±40%)
 FREQ_AUG_CONTROL_PTS = 5       ##控制點數，越少包絡越平滑、越不易產生 ringing
 ```
 
-新增的擾動在 [L138](M5_DataAug.py#L138)：
+新增的擾動在 [L124](M5_DataAug.py#L124)：
 
 ```python
 sig_len = signal.shape[-1]
@@ -730,7 +732,7 @@ output_excel = os.path.join(basepath, uuid+"_Performance_Matrix.xlsx")
 而 `Model/` 根目錄那 10 個 xlsx 的時間是 **2026-09-11 01:57 ~ 03:05**，對應的是 WithAug_2。也就是說 **NoAug 與 WithAug_1 的混淆矩陣都已經被 WithAug_2 蓋掉，救不回來了**（`.pth` 和 `Performance_*.txt` 因為路徑有分模式，都還在）。
 
 ## 改法
-三分類（[L1387](M5_DataAug.py#L1387)）與二分類（[L1929](M5_DataAug.py#L1929)）兩處都改成：
+三分類（[L1373](M5_DataAug.py#L1373)）與二分類（[L1915](M5_DataAug.py#L1915)）兩處都改成：
 
 ```python
 output_excel = os.path.join(basepath,"perf_Matrix",model_subdir,uuid+"_Performance_Matrix.xlsx")
@@ -769,3 +771,77 @@ Model/perf_Matrix/
 
 ## 給之後的提醒
 **任何會依 NoAug/WithAug 分別產生的輸出，路徑裡一定要帶 `model_subdir`。** 這次是靠時間戳才反推出那批 xlsx 屬於哪一輪；如果當時多跑幾輪，就完全分不出來了。
+
+# 2026/09/11 新增 compare_results.py 比較各模式訓練結果
+
+## 背景先更正：WithAug 其實早就跑過了
+先前幾節寫「WithAug 尚未跑過」是根據 README 當時的記載，但實際掃描 `Model/70_30/` 發現已經有三輪（第四輪進行中）：
+
+| 模式 | 執行時間 |
+|---|---|
+| NoAug | 2026-09-09 09:28 ~ 10:02 |
+| WithAug_1 | 2026-09-09 10:19 ~ 11:31 |
+| WithAug_2 | 2026-09-11 01:52 ~ 03:02 |
+| WithAug_3 | 2026-09-11 04:02 ~（進行中） |
+
+**WithAug_3 是在 04:02 啟動的，晚於當天最後一個 commit（03:57），所以它跑的正是「只開頻域平滑幅度擾動、其餘三種時域增強全關」那一版。**
+
+另外，上一節提到 NoAug 與 WithAug_1 的混淆矩陣已被覆蓋。決定**不重建**——如果之後真的需要，可以載入 `Best_*_Model/<uuid>/BestModel_*.pth` 重跑測試段產生，不必重新訓練。這裡記錄下來備查。
+
+## 新增 [compare_results.py](compare_results.py)
+掃描 `Model/<splitting_ratio>/<mode>/Best_{Two,Three}Classes_Model/<uuid>/Performance_*.txt`，輸出三樣東西：
+
+1. terminal 大表（每個 uuid 依模式列出 Sens/Spec/F1/Acc，非基準模式下方多一列相對基準的 Δ）
+2. `Model/<splitting_ratio>/comparison/comparison.csv`（收錄解析到的**所有**欄位，含各類別 sensitivity 與 TP/FP/FN/TN，不只主表那四個）
+3. `comparison_TwoClasses.png` / `comparison_ThreeClasses.png`（2×2 子圖，x 軸 uuid，每組長條代表各模式）
+
+用法：
+
+```bash
+python compare_results.py                      ##預設 baseline=NoAug、splitting_ratio=70_30
+python compare_results.py --baseline WithAug_1
+python compare_results.py --source historic    ##改用 Historic_Best_Performance.txt
+python compare_results.py --no-plot
+```
+
+模式資料夾是**自動探索**的（底下要有 `Best_*Classes_Model` 才算），所以之後多跑 WithAug_4、WithAug_5 不用改程式。
+
+## 實作時處理掉的三個陷阱
+
+**1. 佔位檔會被誤當成 0 分成績。**
+M5 在訓練開始前就會先寫一份全 0 的 `Performance_*.txt`（[L761 起](M5_DataAug.py#L761)），等訓練跑完才覆蓋。第一次跑腳本時 WithAug_3 的 2215 正在訓練中，那份全 0 的佔位檔被當成真實成績，把該模式的平均從 21.11 拉到 10.55。現在用 `is_placeholder()` 判斷：**四個主指標全為 0 且所有 TP/FP/FN/TN 也全為 0** 才算佔位檔，排除不計並在開頭列出。注意判準必須包含 TP/FP/FN/TN，否則會誤殺「真的考 0 分但有預測計數」的結果。
+
+**2. 各模式涵蓋的 uuid 數不同時，MEAN 不可比。**
+訓練還在跑的時候，WithAug_3 只有 1 個 uuid、其他模式有 5 個，直接把兩者的平均並列會嚴重誤導。現在 MEAN 每列都附 `n=`，而且只要發現涵蓋範圍不一致，就會印出警告並**另外用「所有模式都有的 uuid」重算一組可比較的平均**。
+
+**3. 績效檔的 key 可能被分隔線汙染。**
+M5 寫佔位檔時有一行漏了 `\n`，輸出會變成 `-----------------------High_Sensitivity:0`，解析出來的 key 前面掛著一串 `-`。已在 M5 修掉（原 L765；另外三處 `file.write("-----------------------")` 下一行都有補 `\n`，是正常的，沒有動），同時 `parse_performance_file()` 也會把 key 前後的 `-` 去掉，舊檔案一樣解析得出來。
+
+## 圖表的顏色選擇
+用 dataviz reference palette 的 categorical slot 1~3（blue `#2a78d6` / orange `#eb6834` / aqua `#1baf7a`），順序固定不循環。該文件已載明這三個 slot 通過 all-pairs 驗證（light：CVD ΔE 9.2、normal-vision 24.0）。環境沒有 `node`，無法重跑驗證器，屬於「沿用已驗證調色盤」的情況。aqua 在淺色底下對比低於 3:1，適用 relief rule —— 腳本同時輸出 terminal 表格與 CSV，table view 存在。模式數超過 8 個時腳本會**拒絕畫圖**並提示改用分面，而不是自動生成新顏色。
+
+## AUG_* 開關被移到 `__main__`，有個副作用
+開關原本加在檔案開頭（模組層級），後來被移進 `if __name__ == "__main__":`（[L2025 起](M5_DataAug.py#L2025)），跟 `model_subdir`／`augment` 放在一起——就設定集中度來說更好找。
+
+`if` 不建立新作用域，所以 **`python M5_DataAug.py` 直接執行完全正常**，這是目前的用法。但要注意：
+
+```
+把 M5_DataAug 當模組 import 再呼叫 augment_signal()
+  -> NameError: name 'AUG_GAUSSIAN_NOISE' is not defined
+```
+
+因為 `__main__` 區塊不會執行，常數就不存在，而 `augment_signal` 仍然引用它們（已實測確認）。目前沒有任何程式這樣用，所以不影響訓練。
+
+**決定：維持現狀不修改。** 既然對現在的跑法（`python M5_DataAug.py`）沒有影響，就不動它。另外也確認過 DataLoader 沒有設 `num_workers`（預設 0），`augment_signal` 在主行程執行，沒有子行程的問題。
+
+會踩到的時機有兩個，屆時再處理即可：
+1. 之後寫腳本 `import M5_DataAug` 做推論、或重跑測試段重建混淆矩陣。
+2. 在 **Windows** 上跑且 DataLoader 加了 `num_workers>0`——Windows 的 multiprocessing 用 spawn，子行程會以 `__mp_main__` 重新 import 主模組，`__main__` 區塊同樣不執行，`__getitem__` 會在 worker 裡炸。Linux 用 fork 會繼承 globals，所以目前沒事。
+
+真要處理的話，在模組層級補一組預設值、讓 `__main__` 覆寫即可，設定仍然集中在同一處。
+
+## 目前的結果（WithAug_3 尚未跑完，數字會變）
+以 NoAug 為基準，三分類的增強效果明顯（例如 2210 的 Sensitivity 從 51.73 提升到 80.30），二分類則是 sensitivity 上升但 specificity 下降，互有得失。**等 WithAug_3 跑完再用可比較的平均下結論。**
+
+## 尚未驗證
+`compare_results.py` 的 `--source historic` 分支還沒在「同一模式跑過多次」的情況下驗證過（目前每個模式都只有一份 `Performance_*.txt`，historic 與 latest 結果相同）。
