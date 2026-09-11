@@ -144,7 +144,7 @@ git commit -m "說明這次改了什麼"
 # 2026/09/08 實際跑訓練做比較：Data Augmentation 有無的效果
 
 ## 跑之前先修掉兩個擋路的既有 bug（跟 augmentation 無關）
-1. **`ReduceLROnPlateau(..., verbose=1, ...)` 在目前環境會崩潰**：目前 venv 裝的是 PyTorch 2.8，`verbose` 參數已經被移除，`BuildModel_ThreeClasses`/`BuildModel_TwoClasses` 原本一啟動建立 scheduler 就會丟 `TypeError`，跟這次的 augmentation 修改無關，是既有程式與新版 PyTorch 不相容。已把兩處（[L1430](Model_Builder_Predictor_Belle.py#L1430) 三分類、[L1844](Model_Builder_Predictor_Belle.py#L1844) 二分類）的 `verbose=1` 拿掉。
+1. **`ReduceLROnPlateau(..., verbose=1, ...)` 在目前環境會崩潰**：目前 venv 裝的是 PyTorch 2.8，`verbose` 參數已經被移除，`BuildModel_ThreeClasses`/`BuildModel_TwoClasses` 原本一啟動建立 scheduler 就會丟 `TypeError`，跟這次的 augmentation 修改無關，是既有程式與新版 PyTorch 不相容。已把兩處（[L1522](Model_Builder_Predictor_Belle.py#L1522) 三分類、[L1942](Model_Builder_Predictor_Belle.py#L1942) 二分類）的 `verbose=1` 拿掉。
 2. **`data_processing()`／`BuildModel()` 內部原本呼叫訓練流程的部分被註解掉**：`feature_extraction`、`data_arrangement`、以及 `BuildModel_ThreeClasses`/`BuildModel_TwoClasses` 的實際呼叫都被註解，代表跑 `BuildModel()` 只會做完 `data_parsing` 就結束，不會真的訓練模型（看起來是之前測試 `_load_all_srj_data` 效能優化時暫時關閉的）。已重新打開這些呼叫。
 3. 過程中曾經意外發現 `Model_Builder_Predictor_Belle.py` 裡 `ecgDatasetSubset.__len__` 那行被存成亂碼字元（IDE 開著檔案時發生），已修正並重新用 `py_compile` 確認整支檔案語法正常。之後如果編輯這支檔案，存檔後最好順手 `py_compile` 一次確認沒有異常字元。
 
@@ -404,10 +404,10 @@ for i in range(0,len(user_information)):
 
 | 參數 | 原本（三分類 / 二分類） | 改成 | 位置 |
 |---|---|---|---|
-| 訓練輪數 | 20 / 20 | **5** | [L872](M5_DataAug.py#L872)、[L1517](M5_DataAug.py#L1517) |
-| Epoch 上限 | 800 / 800 | **300** | [L768](M5_DataAug.py#L768)、[L1409](M5_DataAug.py#L1409) |
-| Early-stop patience | 50 / **100** | **30** | [L769](M5_DataAug.py#L769)、[L1410](M5_DataAug.py#L1410) |
-| Scheduler patience | 50 / 100 | **15** | [L905](M5_DataAug.py#L905)、[L1553](M5_DataAug.py#L1553) |
+| 訓練輪數 | 20 / 20 | **5** | [L883](M5_DataAug.py#L883)、[L1528](M5_DataAug.py#L1528) |
+| Epoch 上限 | 800 / 800 | **300** | [L779](M5_DataAug.py#L779)、[L1420](M5_DataAug.py#L1420) |
+| Early-stop patience | 50 / **100** | **30** | [L780](M5_DataAug.py#L780)、[L1421](M5_DataAug.py#L1421) |
+| Scheduler patience | 50 / 100 | **15** | [L916](M5_DataAug.py#L916)、[L1564](M5_DataAug.py#L1564) |
 
 預估降到每個 uuid 約 20～25 分鐘、10 個 uuid 約 3.5～4 小時，NoAug＋WithAug 兩邊合計約 7～8 小時。
 
@@ -418,12 +418,12 @@ for i in range(0,len(user_information)):
 2. **scheduler patience 拆成獨立變數 `scheduler_patience`**：三分類原本是 `ReduceLROnPlateau(..., patience=patience)`，直接複用 early-stop 的 `patience`；兩者相等時 LR 永遠不會衰減就先被 early stop 停掉，`ReduceLROnPlateau` 等於白設。現在 `scheduler_patience=15` < `patience=30`，LR 至少有一次衰減的機會。
 
 ## 這次沒有改的東西
-`ReduceLROnPlateau(..., verbose=1, ...)` 保留不動。前面 2026/09/08 那節提到這個參數在 PyTorch 2.8 會丟 `TypeError`，但這台機器（H100 80GB HBM3）的環境是 **torch 2.5.1+cu121**，`verbose` 還在（只是 deprecated），不會炸。如果之後換到 2.8 以上的環境跑 M5，這兩處（[L905](M5_DataAug.py#L905)、[L1553](M5_DataAug.py#L1553)）要比照 Model_Builder_Predictor_Belle.py 拿掉 `verbose`。
+`ReduceLROnPlateau(..., verbose=1, ...)` 保留不動。前面 2026/09/08 那節提到這個參數在 PyTorch 2.8 會丟 `TypeError`，但這台機器（H100 80GB HBM3）的環境是 **torch 2.5.1+cu121**，`verbose` 還在（只是 deprecated），不會炸。如果之後換到 2.8 以上的環境跑 M5，這兩處（[L916](M5_DataAug.py#L916)、[L1564](M5_DataAug.py#L1564)）要比照 Model_Builder_Predictor_Belle.py 拿掉 `verbose`。
 
 ## 怎麼確認訓練真的在 GPU 上
 容器環境裡 `nvidia-smi` 下方的 Processes 表格會是空的（PID namespace 隔離，查詢會顯示 `[Not Found]`），**不能**因為那張表沒列出 process 就以為沒用到 GPU。可靠的確認方式：
 
-1. 看程式自己印的 log（[L877-885](M5_DataAug.py#L877-L885)、[L1523-1531](M5_DataAug.py#L1523-L1531)）每輪開頭會印 `cuda:0`、`GPU Count: 1`、`NVIDIA H100 80GB HBM3`；掉回 CPU 會印 `cpu` 且沒有裝置名稱。
+1. 看程式自己印的 log（[L888-896](M5_DataAug.py#L888-L896)、[L1534-1542](M5_DataAug.py#L1534-L1542)）每輪開頭會印 `cuda:0`、`GPU Count: 1`、`NVIDIA H100 80GB HBM3`；掉回 CPU 會印 `cpu` 且沒有裝置名稱。
 2. `ls -l /proc/$(pgrep -f M5_DataAug)/fd | grep nvidia` 看 process 有沒有開 `/dev/nvidiaN`（`nvidia-smi -q | grep -i "minor number"` 可以對應是哪張卡）。
 3. `nvidia-smi` 看 GPU-Util／Memory-Usage 有沒有在動。
 
@@ -472,10 +472,10 @@ cd /share/Belle/DataAug && python M5_DataAug.py 2>&1 | tee train_noaug_$(date +%
 
 | 檔案 | 位置 | tag |
 |---|---|---|
-| M5_DataAug.py | [L1015](M5_DataAug.py#L1015) | ThreeClasses |
-| M5_DataAug.py | [L1641](M5_DataAug.py#L1641) | TwoClasses |
-| Model_Builder_Predictor_Belle.py | [L1614](Model_Builder_Predictor_Belle.py#L1614) | ThreeClasses |
-| Model_Builder_Predictor_Belle.py | [L2026](Model_Builder_Predictor_Belle.py#L2026) | TwoClasses |
+| M5_DataAug.py | [L1026](M5_DataAug.py#L1026) | ThreeClasses |
+| M5_DataAug.py | [L1652](M5_DataAug.py#L1652) | TwoClasses |
+| Model_Builder_Predictor_Belle.py | [L1625](Model_Builder_Predictor_Belle.py#L1625) | ThreeClasses |
+| Model_Builder_Predictor_Belle.py | [L2037](Model_Builder_Predictor_Belle.py#L2037) | TwoClasses |
 
 `Model_Builder_Predictor_Belle.py` 原本沒有 import `common`，補了一行 [L50](Model_Builder_Predictor_Belle.py#L50)（檔案開頭本來就有把自己的目錄加進 `sys.path`，所以直接 import 得到）。`M5_DataAug.py` 則是加進既有的 `from common import (...)` 區塊。
 
@@ -492,7 +492,7 @@ if Epoch_range[0] == 0:
 
 `Loss_list` / `ACCs` 的初始化被包在「從第 0 個 epoch 開始」的守衛裡，但迴圈內的 `Loss_list.append(...)` 是無條件執行的。只要用非零的 `Epoch_range` 續訓，第一個 epoch 就會 `NameError: name 'Loss_list' is not defined`。
 
-已把兩行初始化移到 `if` 外面（[M5 L889](M5_DataAug.py#L889)、[M5 L1534](M5_DataAug.py#L1534)、[MBP L1496](Model_Builder_Predictor_Belle.py#L1496)、[MBP L1915](Model_Builder_Predictor_Belle.py#L1915)），建立模型那段仍然留在守衛內。目前的 `__main__` 都是從 0 開始跑，所以這個 bug 還沒被踩到，但新加的記錄功能會用到續訓路徑，先修掉。
+已把兩行初始化移到 `if` 外面（[M5 L900](M5_DataAug.py#L900)、[M5 L1545](M5_DataAug.py#L1545)、[MBP L1507](Model_Builder_Predictor_Belle.py#L1507)、[MBP L1926](Model_Builder_Predictor_Belle.py#L1926)），建立模型那段仍然留在守衛內。目前的 `__main__` 都是從 0 開始跑，所以這個 bug 還沒被踩到，但新加的記錄功能會用到續訓路徑，先修掉。
 
 ## 驗證
 - `save_training_history()` 單獨測過：一般情況、續訓合併（epoch 1–3 存檔後再存 4–5，CSV 正確接成 1–5）、混入 torch tensor 的 accuracy、空 list 回傳 `(None, None)` 不炸，PNG 有實際開起來看過。
@@ -504,3 +504,69 @@ if Epoch_range[0] == 0:
 
 ## 踩到的坑：換行符
 `M5_DataAug.py` 是 **CRLF** 換行（其他 .py 和 .md 都是 LF）。用 Python 以文字模式讀寫會把 CRLF 吃成 LF，導致整個檔案 2000 多行全部變成 diff。已還原成 CRLF，現在 diff 只有實際改動的部分。**之後用腳本批次改這個檔案時要注意**，用 binary 模式讀寫或改完檢查 `git diff --stat` 的行數是否合理。
+
+# 2026/09/11 時間軸平移改用邊緣補值，取代 torch.roll
+
+## 問題
+Data augmentation 的時間軸平移原本用 `torch.roll`：
+
+```python
+shift = int(torch.randint(-5, 6, (1,)).item())
+signal = torch.roll(signal, shifts=shift, dims=-1)
+```
+
+`torch.roll` 是**循環**的 —— 被推出右端的取樣點會從左端繞回來，等於在訊號中間接出一個真實 ECG 不會出現的跳階。
+
+## 先量測，再決定要不要改
+沒有直接改，先掃了 8 個 uuid、7360 個 training beat 實測這個跳階到底多大（訊號經 `normalize1` 正規化後全幅 = 1）：
+
+| 量測 | 數值 |
+|---|---|
+| 接縫跳階 `\|x[0]-x[149]\|` 中位數 | 0.0086 |
+| 接縫跳階 p99 / 最大值 | 0.040 / 0.084 |
+| 自然逐點變化 `\|x[i+1]-x[i]\|` 中位數 | 0.0043 |
+| 每個 beat 自己的 QRS 最大斜率（中位數） | 0.276 |
+| 接縫 ÷ 該 beat 最大自然斜率（中位數） | **3.1%** |
+| 接縫大於該 beat 最大自然斜率的比例 | **0 / 7360 = 0.0%** |
+
+**結論是這個 bug 的實際傷害很小**，原因是 beat 切割時 R 峰被鎖在 index 50（實測 argmax 位置 p5=50、中位數=50、p95=51），所以視窗兩端都落在平坦的 TP 基線區（頭 5 點平均 0.123、尾 5 點平均 0.136），接起來的落差自然就小。沒有任何一個 beat 的接縫跳階超過它自己 QRS 上升沿的大小，對 CNN 來說比較像是基線雜訊稍大，而不是一個結構性的假訊號。
+
+## 那為什麼還是改了
+1. 上面的結論**是建立在「R 峰鎖在 50」這個前提上的**。哪天 beat 切割方式改了、或 shift 從 ±5 放大，這個前提就不一定還成立，又要重新驗證一次。邊緣補值則無論如何都不會產生非生理的不連續。
+2. **現在改是免費的**：WithAug 還沒跑過（目前 `augment=False`／`model_subdir="NoAug"`）。一旦 WithAug 跑完再改 augmentation，那批結果就跟之後的不能比，得整批重跑。
+3. 截掉邊緣 5 點的代價實測過，是可以接受的：頭尾 5 點偏離基線只有 0.058 / 0.045，對照 QRS 峰值偏離基線 0.816，**截掉的純粹是基線，沒有波形資訊**。T 波峰在 idx 110–120，離邊界很遠。
+
+## 改法
+[M5_DataAug.py L109](M5_DataAug.py#L109)、[Model_Builder_Predictor_Belle.py L866](Model_Builder_Predictor_Belle.py#L866)（兩個檔案是同一份重複的 `augment_signal`，一起改）：
+
+```python
+shift = int(torch.randint(-5, 6, (1,)).item())
+if shift != 0:
+    pad = abs(shift)
+    if shift > 0:   ###往右移，左端用第一點補、截掉尾端
+        signal = torch.cat([signal[..., :1].expand(*signal.shape[:-1], pad),
+                            signal[..., :-pad]], dim=-1)
+    else:           ###往左移，右端用最後一點補、截掉開頭
+        signal = torch.cat([signal[..., pad:],
+                            signal[..., -1:].expand(*signal.shape[:-1], pad)], dim=-1)
+```
+
+`signal` 在這裡是 `(1, 150)`，而 `F.pad` 的 `mode='replicate'` 對 1D 需要 3D 輸入 `(N, C, W)`，所以沒有用 `F.pad`，直接用 `expand` + `cat`。
+
+## 驗證
+- 小張量逐一檢查平移結果正確（`shift=+3` → `[0,0,0,0,1,2,...]`、`shift=-3` → `[3,4,...,9,9,9,9]`、`shift=0` 不變）。
+- 500 個真實 beat × 4 種 shift：輸出形狀維持 `(1,150)`、**R 峰位移量 100% 正確**。
+- 接縫處跳變實測：`torch.roll` 中位數 0.0043 / 最大 0.0430，**邊緣補值 100% 為 0**。
+
+（順帶一提，第一次驗證時用「全訊號最大逐點跳變」當指標，兩種做法都得到 1.0 —— 因為最大跳變一定是 QRS，直接蓋過接縫。要量接縫就必須指定接縫位置去量，這個指標不能用全域最大值。）
+
+## 理論上更正確、但這次沒做的做法
+這 150 點是從連續 ECG 上切下來的，所以時間平移最正確的實作是**在切 beat 的時候就把 shift 加進去**，兩端補的會是真實的鄰近取樣點，既不循環也不用假的平坦段。但那要動到資料處理管線（回頭重新 parse srj），以目前 ±5 點的幅度來說不值得為此重跑整個資料處理。
+
+## 順帶更新：行號連結
+這次 `augment_signal` 從 3 行變成 14 行(+11)，插入點之後的行號全部位移，前面幾節引用的 `M5_DataAug.py#L...` / `Model_Builder_Predictor_Belle.py#L...` 已一併更新（插入點之前的不受影響）。
+
+另外發現 2026/09/08 那節指向 `ReduceLROnPlateau`（拿掉 `verbose=1`）的兩個連結 **在這次改動之前就已經失效**了，順手一起修正成 [L1522](Model_Builder_Predictor_Belle.py#L1522)、[L1942](Model_Builder_Predictor_Belle.py#L1942)。所有連結都逐一對照過實際程式碼內容確認無誤。
+
+## 尚未驗證
+改完還沒在真實訓練中跑過。

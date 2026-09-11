@@ -864,8 +864,19 @@ class ecgDataset(Dataset):
             signal = signal * scale
 
         if torch.rand(1).item() < 0.5:  ##時間軸小幅平移
+            ###不用 torch.roll：roll 是循環的，被推出一端的取樣點會從另一端繞回來，
+            ###在訊號中間接出一個真實 ECG 不會出現的跳階。改成邊緣補值(replicate)：
+            ###平移後空出來的那幾點用最靠近的邊緣值填，另一端多出來的直接截掉。
+            ###這裡 signal 是 (1, 150)，F.pad 的 replicate 模式需要 3D 輸入，所以直接用 cat。
             shift = int(torch.randint(-5, 6, (1,)).item())
-            signal = torch.roll(signal, shifts=shift, dims=-1)
+            if shift != 0:
+                pad = abs(shift)
+                if shift > 0:   ###往右移，左端用第一點補、截掉尾端
+                    signal = torch.cat([signal[..., :1].expand(*signal.shape[:-1], pad),
+                                        signal[..., :-pad]], dim=-1)
+                else:           ###往左移，右端用最後一點補、截掉開頭
+                    signal = torch.cat([signal[..., pad:],
+                                        signal[..., -1:].expand(*signal.shape[:-1], pad)], dim=-1)
 
         return signal
 
